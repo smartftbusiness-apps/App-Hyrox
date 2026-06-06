@@ -1,0 +1,35 @@
+export function translateAuthError(message: string): string {
+  const lower = message.toLowerCase();
+
+  if (lower.includes('invalid login credentials')) {
+    return 'E-mail ou senha incorretos. Se acabou de criar a conta, confirme o e-mail antes de entrar.';
+  }
+  if (lower.includes('email not confirmed')) {
+    return 'E-mail ainda não confirmado. Abra o link que o Supabase enviou (verifique spam) ou peça para confirmar no painel.';
+  }
+  if (lower.includes('user already registered')) {
+    return 'Este e-mail já tem conta. Use Entrar em vez de Criar conta.';
+  }
+  if (lower.includes('password should be at least')) {
+    return 'A senha precisa ter pelo menos 6 caracteres.';
+  }
+  if (lower.includes('unable to validate email')) {
+    return 'E-mail inválido. Verifique se digitou corretamente.';
+  }
+
+  return message;
+}
+
+export function translateSyncError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+
+  if (lower.includes('schema cache') || lower.includes('could not find the table')) {
+    return 'As tabelas do app ainda não existem no Supabase. Rode o arquivo setup_completo.sql no SQL Editor do projeto.';
+  }
+  if (lower.includes('jwt') || lower.includes('invalid api key')) {
+    return 'Chave do Supabase inválida. Confira o arquivo .env ou gere um APK novo.';
+  }
+
+  return message;
+}
