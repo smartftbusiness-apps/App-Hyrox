@@ -1,4 +1,4 @@
-import type { Athlete, AthleteStatus, Category, DoublesPair } from '@/src/domain/types';
+import type { Athlete, AthleteStatus, Category, DoublesPair, EventHeat } from '@/src/domain/types';
 import { isDoublesCategory } from '@/src/utils/categoryHelpers';
 import { getCategoryNameForAthlete } from '@/src/utils/athleteHelpers';
 import { getCategoryDisplayName } from '@/src/utils/categoryLabel';
@@ -36,6 +36,21 @@ export type EventParticipantRow =
       status: AthleteStatus;
       teamName?: string;
     };
+
+export function participantsForHeat(
+  participants: TimingParticipant[],
+  heat: EventHeat,
+): TimingParticipant[] {
+  return participants.filter((p) => {
+    if (heat.categoryIds.length > 0 && !heat.categoryIds.includes(p.categoryId)) {
+      return false;
+    }
+    if (heat.bibNumbers.length > 0 && !heat.bibNumbers.includes(p.bib)) {
+      return false;
+    }
+    return p.status !== 'finished';
+  });
+}
 
 export function buildTimingParticipants(
   athletes: Athlete[],

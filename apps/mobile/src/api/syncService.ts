@@ -18,7 +18,7 @@ import type { RepositoryResult } from '@/src/api/repositoryTypes';
 import { dbIdFromLocalId, isUuid, localIdFromDb, resolveDbId } from '@/src/api/repositoryTypes';
 import { getTemplateSegmentIdByOrder } from '@/src/api/segmentTemplate';
 import { useAthletesStore } from '@/src/stores/athletesStore';
-import { useCloudStatusStore } from '@/src/stores/cloudStatusStore';
+import { useEventStaffStore } from '@/src/stores/eventStaffStore';
 import { useEventsStore } from '@/src/stores/eventsStore';
 
 type DbEvent = {
@@ -264,6 +264,89 @@ export async function pullOrganizerDataFromSupabase(
   return loadBundleFromDbEvents((eventRows ?? []) as DbEvent[]);
 }
 
+export async function pullJudgeAssignedData(userId: string): Promise<{
+  events: HyroxEvent[];
+  athletes: Athlete[];
+  pairs: DoublesPair[];
+  assignedLocalIds: string[];
+}> {
+  if (!isSupabaseConfigured()) {
+    return { events: [], athletes: [], pairs: [], assignedLocalIds: [] };
+  }
+
+  const { data: staffRows, error: staffError } = await getSupabase()
+    .from('event_staff')
+    .select('event_id')
+    .eq('user_id', userId);
+
+  if (staffError) throw new Error(staffError.message);
+
+  const eventDbIds = [...new Set((staffRows ?? []).map((r) => r.event_id as string))];
+  if (!eventDbIds.length) {
+    return { events: [], athletes: [], pairs: [], assignedLocalIds: [] };
+  }
+
+  const { data: eventRows, error: eventsError } = await getSupabase()
+    .from('events')
+    .select('id, organizer_id, name, event_date, location, status')
+    .in('id', eventDbIds)
+    .order('event_date', { ascending: false });
+
+  if (eventsError) throw new Error(eventsError.message);
+
+  const bundle = await loadBundleFromDbEvents((eventRows ?? []) as DbEvent[]);
+  return {
+    ...bundle,
+    assignedLocalIds: bundle.events.map((e) => e.id),
+  };
+}
+
+export type JudgeSyncResult = { ok: true } | { ok: false; reason: string };
+
+export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSyncResult> {
+  try {
+    const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs, assignedLocalIds } =
+      await pullJudgeAssignedData(userId);
+
+    useEventStaffStore.getState().setAssignedEventIds(assignedLocalIds);
+
+    const remoteIds = new Set(dbEvents.map((e) => e.id));
+
+    useEventsStore.setState((state) => {
+      const kept = state.events.filter(
+        (e) => !remoteIds.has(e.id) && !assignedLocalIds.includes(e.id),
+      );
+      const merged = dbEvents.map((remote) => {
+        const existing = state.events.find(
+          (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
+        );
+        return existing
+          ? { ...remote, id: existing.id, segments: existing.segments, heats: existing.heats }
+          : remote;
+      });
+      return { events: [...merged, ...kept.filter((e) => !assignedLocalIds.includes(e.id))] };
+    });
+
+    const eventIds = new Set(assignedLocalIds);
+
+    useAthletesStore.setState((state) => ({
+      athletes: [
+        ...dbAthletes.filter((a) => eventIds.has(a.eventId)),
+        ...state.athletes.filter((a) => !eventIds.has(a.eventId)),
+      ],
+      pairs: [
+        ...dbPairs.filter((p) => eventIds.has(p.eventId)),
+        ...state.pairs.filter((p) => !eventIds.has(p.eventId)),
+      ],
+    }));
+
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Erro ao buscar eventos do juiz';
+    return { ok: false, reason: message };
+  }
+}
+
 /** Eventos públicos: inscrições abertas, ao vivo ou encerrados (RLS permite leitura) */
 export async function pullPublicEventsFromSupabase(): Promise<{
   events: HyroxEvent[];
@@ -292,15 +375,8 @@ export type PublicSyncResult =
   | { ok: false; reason: string };
 
 export async function pullAndMergePublicEvents(): Promise<PublicSyncResult> {
-  const cloud = await useCloudStatusStore.getState().checkCloud();
-  if (cloud === 'not_configured') {
+  if (!isSupabaseConfigured()) {
     return { ok: false, reason: 'Este app não está configurado para a nuvem.' };
-  }
-  if (cloud === 'offline') {
-    return {
-      ok: false,
-      reason: 'Nuvem indisponível no momento. Tente de novo em alguns minutos.',
-    };
   }
 
   try {

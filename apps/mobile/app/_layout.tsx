@@ -4,9 +4,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect } from 'react';
 import 'react-native-reanimated';
 import { HyroxTheme } from '@/constants/Theme';
-import { pullAndMergePublicEvents } from '@/src/api/syncService';
 import { hydrateAuthStore } from '@/src/stores/authStore';
-import { useAccessModeStore } from '@/src/stores/accessModeStore';
 import { useCloudStatusStore } from '@/src/stores/cloudStatusStore';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { hydrateAthletesStore, syncAthletesWithEvents } from '@/src/stores/athletesStore';
@@ -59,9 +57,6 @@ export default function RootLayout() {
         if (isSupabaseConfigured()) {
           await useCloudStatusStore.getState().checkCloud();
         }
-        if (useAccessModeStore.getState().isViewer()) {
-          await pullAndMergePublicEvents().catch(() => undefined);
-        }
       })
       .catch(() => {
         useEventsStore.getState().setHydrated(true);
@@ -82,7 +77,7 @@ export default function RootLayout() {
           options={{
             headerStyle: { backgroundColor: HyroxTheme.surface },
             headerTintColor: HyroxTheme.text,
-            title: 'Conta organizador',
+            title: 'Conta',
           }}
         />
         <Stack.Screen

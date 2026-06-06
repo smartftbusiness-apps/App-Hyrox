@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/Input';
 import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
 import type { SegmentType } from '@/src/domain/types';
-import { useEvent, useIsEventOwner } from '@/src/hooks/useEvent';
+import { useEvent } from '@/src/hooks/useEvent';
+import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useEventsStore } from '@/src/stores/eventsStore';
 
 const SEGMENT_TYPES: { value: SegmentType; label: string }[] = [
@@ -19,11 +20,11 @@ const SEGMENT_TYPES: { value: SegmentType; label: string }[] = [
 export default function StationsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const event = useEvent(id);
-  const isOwner = useIsEventOwner(event);
+  const perms = useEventPermissions(event);
   const addSegment = useEventsStore((s) => s.addSegment);
   const removeSegment = useEventsStore((s) => s.removeSegment);
   const resetSegmentsToHyrox = useEventsStore((s) => s.resetSegmentsToHyrox);
-  const canEdit = isOwner && event?.status !== 'finished';
+  const canEdit = perms.canEditStructure;
 
   const [type, setType] = useState<SegmentType>('station');
   const [name, setName] = useState('');

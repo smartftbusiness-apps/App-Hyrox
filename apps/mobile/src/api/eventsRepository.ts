@@ -75,4 +75,15 @@ export async function finishEventInSupabase(event: HyroxEvent): Promise<Reposito
   return updateEventStatusInSupabase(event, 'finished');
 }
 
+export async function deleteEventInSupabase(event: HyroxEvent): Promise<RepositoryResult<void>> {
+  if (!isSupabaseConfigured()) return { ok: true, data: undefined };
+
+  const dbId = resolveDbEventId(event);
+  if (!dbId) return { ok: true, data: undefined };
+
+  const { error } = await getSupabase().from('events').delete().eq('id', dbId);
+  if (error) return { ok: false, reason: error.message };
+  return { ok: true, data: undefined };
+}
+
 export { isUuid };

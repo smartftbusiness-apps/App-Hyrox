@@ -9,8 +9,8 @@ import { HyroxTheme } from '@/constants/Theme';
 import { useAthletesByEvent, usePairsByEvent } from '@/src/stores/athletesStore';
 import { getDoublesCategories } from '@/src/utils/categoryHelpers';
 import { groupEventParticipants } from '@/src/utils/participantHelpers';
-import { useEvent, useIsEventOwner } from '@/src/hooks/useEvent';
-import { useIsViewerMode } from '@/src/stores/accessModeStore';
+import { useEvent } from '@/src/hooks/useEvent';
+import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useRouteId } from '@/src/hooks/useRouteId';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
@@ -21,10 +21,10 @@ import { navigateToEventsHome } from '@/src/utils/navigation';
 export default function EventDetailScreen() {
   const id = useRouteId();
   const event = useEvent(id);
-  const isOwner = useIsEventOwner(event);
-  const isViewer = useIsViewerMode();
+  const perms = useEventPermissions(event);
   const updateEventStatus = useEventsStore((s) => s.updateEventStatus);
   const finishEvent = useEventsStore((s) => s.finishEvent);
+  const deleteEvent = useEventsStore((s) => s.deleteEvent);
   const [finishing, setFinishing] = useState(false);
   const athletes = useAthletesByEvent(id);
   const pairs = usePairsByEvent(id);
@@ -50,7 +50,7 @@ export default function EventDetailScreen() {
     pairs.filter((p) => p.status === 'racing').length;
   const finished = finishReadiness.finishedCount;
   const stationCount = event.segments.filter((s) => s.type === 'station').length;
-  const canEdit = isOwner && !isFinished && !isViewer;
+  const canEdit = perms.canEditStructure;
   const canEditParticipants = canEdit;
   const finishBlockReason = getFinishEventBlockReason(finishReadiness);
 
@@ -184,12 +184,23 @@ export default function EventDetailScreen() {
           </View>
         )}
 
-        {!isOwner && !isFinished && (
+        {perms.isReadOnly && !isFinished && (
           <View style={[styles.banner, styles.bannerMuted]}>
             <Text style={styles.bannerText}>
-              Somente quem criou este evento pode editá-lo ou encerrá-lo.
+              {perms.isAssignedJudge
+                ? 'Modo juiz: visualização e cronômetro. Edição restrita ao organizador.'
+                : 'Somente o organizador pode editar este evento.'}
             </Text>
           </View>
+        )}
+
+        {perms.canControlTiming && !isFinished && (
+          <Button
+            label="Abrir cronômetro"
+            variant="primary"
+            onPress={() => router.push('/(tabs)/timing')}
+            style={{ marginBottom: 16 }}
+          />
         )}
 
         <View style={styles.statsRow}>
@@ -340,6 +351,49 @@ export default function EventDetailScreen() {
         ))}
         {event.segments.length > 5 && canEdit && (
           <Text style={styles.moreText}>Ver todos em Gerenciar →</Text>
+        )}
+
+        {canEdit && (
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Baterias ({(event.heats ?? []).length})</Text>
+            <Button
+              label="Gerenciar"
+              variant="secondary"
+              onPress={() => router.push(`/event/${eventId}/heats`)}
+              style={styles.manageBtn}
+            />
+          </View>
+        )}
+
+        {canEdit && (
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Juízes</Text>
+            <Button
+              label="Designar"
+              variant="secondary"
+              onPress={() => router.push(`/event/${eventId}/judges`)}
+              style={styles.manageBtn}
+            />
+          </View>
+        )}
+
+        {perms.canDeleteEvent && (
+          <Button
+            label="Excluir evento"
+            variant="danger"
+            onPress={async () => {
+              const confirmed = await confirmAsync(
+                'Excluir evento',
+                'Esta ação não pode ser desfeita. Todos os dados do evento serão removidos.',
+                'Excluir',
+              );
+              if (!confirmed) return;
+              const result = await deleteEvent(eventId);
+              if (!result.ok) Alert.alert('Erro', result.reason);
+              else navigateToEventsHome();
+            }}
+            style={{ marginTop: 24 }}
+          />
         )}
       </Screen>
     </>
