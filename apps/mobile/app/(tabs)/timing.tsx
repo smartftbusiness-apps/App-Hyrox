@@ -6,10 +6,13 @@ import { Screen } from '@/components/ui/Screen';
 import { SegmentProgress } from '@/components/SegmentProgress';
 import { TimerDisplay } from '@/components/TimerDisplay';
 import { HyroxTheme } from '@/constants/Theme';
+import type { HyroxEvent } from '@/src/domain/types';
 import { useAthletesByEvent, useAthletesStore, usePairsByEvent } from '@/src/stores/athletesStore';
-import { useEvents } from '@/src/stores/eventsStore';
+import { useEventStaffStore } from '@/src/stores/eventStaffStore';
+import { useEvents, useEventsStore } from '@/src/stores/eventsStore';
+import { useOrganizerStore } from '@/src/stores/organizerStore';
 import type { TimingParticipant } from '@/src/utils/participantHelpers';
-import { buildTimingParticipants } from '@/src/utils/participantHelpers';
+import { buildTimingParticipants, participantsForHeat } from '@/src/utils/participantHelpers';
 import { formatMs } from '@/src/utils/formatTime';
 import {
   advanceSegment,
@@ -23,10 +26,21 @@ import {
   type TimingRunState,
 } from '@/src/utils/timingRun';
 
+function canControlEventTiming(event: HyroxEvent): boolean {
+  const owner = useOrganizerStore.getState().isEventOwner(event.organizerId);
+  const judge = useEventStaffStore.getState().isAssignedJudge(event.id);
+  return owner || judge;
+}
+
 export default function TimingScreen() {
   const events = useEvents();
+  const markHeatStarted = useEventsStore((s) => s.markHeatStarted);
   const timingEvents = useMemo(
-    () => events.filter((e) => e.status === 'live' || e.status === 'open'),
+    () =>
+      events.filter(
+        (e) =>
+          (e.status === 'live' || e.status === 'open') && canControlEventTiming(e),
+      ),
     [events],
   );
 
@@ -102,7 +116,27 @@ export default function TimingScreen() {
     }
     setRuns((prev) => ({ ...prev, [key]: createTimingRun(participant) }));
     setActiveKey(key);
-    setParticipantStatus(eventId, participant.id, participant.type, 'racing');
+    const result = setParticipantStatus(eventId, participant.id, participant.type, 'racing');
+    if (!result.ok) Alert.alert('Cronômetro', result.reason);
+  }
+
+  function startHeat(heatId: string) {
+    if (!eventId || !selectedEvent) return;
+    const heat = (selectedEvent.heats ?? []).find((h) => h.id === heatId);
+    if (!heat) return;
+    const mark = markHeatStarted(eventId, heatId);
+    if (!mark.ok) {
+      Alert.alert('Bateria', mark.reason);
+      return;
+    }
+    const batch = participantsForHeat(participants, heat);
+    if (batch.length === 0) {
+      Alert.alert('Bateria', 'Nenhum participante elegível nesta bateria.');
+      return;
+    }
+    for (const p of batch) {
+      startParticipant(p);
+    }
   }
 
   function selectActive(key: string) {
@@ -214,6 +248,31 @@ export default function TimingScreen() {
           </Pressable>
         ))}
       </View>
+
+      {(selectedEvent?.heats ?? []).length > 0 && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Baterias</Text>
+          {(selectedEvent?.heats ?? []).map((heat) => (
+            <View key={heat.id} style={styles.heatRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.participantName}>{heat.name}</Text>
+                <Text style={styles.participantMeta}>
+                  {new Date(heat.scheduledStartAt).toLocaleTimeString('pt-BR', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                  {heat.startedAt ? ' · iniciada' : ''}
+                </Text>
+              </View>
+              <Button
+                label={heat.startedAt ? 'Reiniciar' : 'Iniciar bateria'}
+                variant="primary"
+                onPress={() => startHeat(heat.id)}
+              />
+            </View>
+          ))}
+        </View>
+      )}
 
       {runList.length > 0 && (
         <View style={styles.section}>
@@ -514,4 +573,12 @@ const styles = StyleSheet.create({
   finishedSub: { color: HyroxTheme.textMuted, fontSize: 14, marginTop: 8 },
   hint: { color: HyroxTheme.textMuted, fontSize: 13, marginBottom: 12, lineHeight: 18 },
   empty: { color: HyroxTheme.textMuted, textAlign: 'center', marginTop: 12 },
+  heatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: HyroxTheme.border,
+  },
 });

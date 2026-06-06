@@ -7,7 +7,8 @@ import { Input } from '@/components/ui/Input';
 import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
 import type { Division, Gender } from '@/src/domain/types';
-import { useEvent, useIsEventOwner } from '@/src/hooks/useEvent';
+import { useEvent } from '@/src/hooks/useEvent';
+import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { EventNotFound } from '@/components/EventNotFound';
 import { buildCategoryName, genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
@@ -28,10 +29,10 @@ const GENDERS: { value: Gender; label: string }[] = [
 export default function CategoriesScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const event = useEvent(id);
-  const isOwner = useIsEventOwner(event);
+  const perms = useEventPermissions(event);
   const addCategory = useEventsStore((s) => s.addCategory);
   const removeCategory = useEventsStore((s) => s.removeCategory);
-  const canEdit = isOwner && event?.status !== 'finished';
+  const canEdit = perms.canEditStructure;
 
   const [division, setDivision] = useState<Division>('Open');
   const [gender, setGender] = useState<Gender>('M');

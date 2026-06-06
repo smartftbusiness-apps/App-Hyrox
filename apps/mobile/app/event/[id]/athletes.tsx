@@ -6,7 +6,8 @@ import { EventNotFound } from '@/components/EventNotFound';
 import { Input } from '@/components/ui/Input';
 import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
-import { useEvent, useIsEventOwner } from '@/src/hooks/useEvent';
+import { useEvent } from '@/src/hooks/useEvent';
+import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useAthletesByEvent, useAthletesStore, usePairsByEvent } from '@/src/stores/athletesStore';
 import { getCategoryNameForAthlete, groupAthletesByCategory } from '@/src/utils/athleteHelpers';
 import { getDoublesCategories, isDoublesCategory } from '@/src/utils/categoryHelpers';
@@ -31,7 +32,7 @@ export default function EventAthletesScreen() {
   const event = useEvent(id);
   const athletes = useAthletesByEvent(id);
   const pairs = usePairsByEvent(id);
-  const isOwner = useIsEventOwner(event);
+  const perms = useEventPermissions(event);
   const addAthlete = useAthletesStore((s) => s.addAthlete);
   const removeAthlete = useAthletesStore((s) => s.removeAthlete);
   const updateAthleteName = useAthletesStore((s) => s.updateAthleteName);
@@ -42,7 +43,7 @@ export default function EventAthletesScreen() {
   const updatePairCategory = useAthletesStore((s) => s.updatePairCategory);
   const getNextBib = useAthletesStore((s) => s.getNextBib);
 
-  const canEdit = isOwner && event?.status !== 'finished';
+  const canEdit = perms.canEditStructure;
 
   const [name, setName] = useState('');
   const [bib, setBib] = useState('');

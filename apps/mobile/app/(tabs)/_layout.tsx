@@ -2,10 +2,10 @@ import { SymbolView } from 'expo-symbols';
 import { Tabs } from 'expo-router';
 import { HyroxTheme } from '@/constants/Theme';
 import { useClientOnlyValue } from '@/components/useClientOnlyValue';
-import { useIsViewerMode } from '@/src/stores/accessModeStore';
+import { useIsJudgeMode } from '@/src/stores/accessModeStore';
 
 export default function TabLayout() {
-  const isViewer = useIsViewerMode();
+  const isJudge = useIsJudgeMode();
 
   return (
     <Tabs
@@ -36,7 +36,7 @@ export default function TabLayout() {
         name="athletes"
         options={{
           title: 'Atletas',
-          href: isViewer ? null : undefined,
+          href: isJudge ? null : undefined,
           tabBarIcon: ({ color }) => (
             <SymbolView name={{ ios: 'person.2', android: 'group', web: 'group' }} tintColor={color} size={24} />
           ),
@@ -46,7 +46,6 @@ export default function TabLayout() {
         name="timing"
         options={{
           title: 'Cronômetro',
-          href: isViewer ? null : undefined,
           tabBarIcon: ({ color }) => (
             <SymbolView name={{ ios: 'stopwatch', android: 'timer', web: 'timer' }} tintColor={color} size={24} />
           ),

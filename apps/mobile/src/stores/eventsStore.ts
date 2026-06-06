@@ -1,6 +1,15 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { Category, Division, EventStatus, Gender, HyroxEvent, Segment, SegmentType } from '@/src/domain/types';
+import type {
+  Category,
+  Division,
+  EventHeat,
+  EventStatus,
+  Gender,
+  HyroxEvent,
+  Segment,
+  SegmentType,
+} from '@/src/domain/types';
 import { cloneHyroxSegments } from '@/src/domain/hyroxTemplate';
 import { MOCK_EVENTS } from '@/src/data/mockData';
 import { getSafeStorage } from '@/src/storage/safeStorage';
@@ -12,7 +21,11 @@ import {
 import { buildCategoryName } from '@/src/utils/categoryLabel';
 import { useOrganizerStore } from '@/src/stores/organizerStore';
 import { useAthletesStore } from '@/src/stores/athletesStore';
-import { createEventInSupabase, finishEventInSupabase } from '@/src/api/eventsRepository';
+import {
+  createEventInSupabase,
+  deleteEventInSupabase,
+  finishEventInSupabase,
+} from '@/src/api/eventsRepository';
 import { pushEventToSupabase, scheduleEventSync } from '@/src/api/syncService';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
@@ -38,6 +51,13 @@ export type AddSegmentInput = {
   target: string;
 };
 
+export type AddHeatInput = {
+  name: string;
+  scheduledStartAt: string;
+  categoryIds?: string[];
+  bibNumbers?: number[];
+};
+
 export type ActionResult = { ok: true; warning?: string } | { ok: false; reason: string };
 
 type EventsState = {
@@ -51,6 +71,10 @@ type EventsState = {
   resetSegmentsToHyrox: (eventId: string) => ActionResult;
   updateEventStatus: (eventId: string, status: EventStatus) => ActionResult;
   finishEvent: (eventId: string) => Promise<ActionResult>;
+  deleteEvent: (eventId: string) => Promise<ActionResult>;
+  addHeat: (eventId: string, input: AddHeatInput) => ActionResult;
+  removeHeat: (eventId: string, heatId: string) => ActionResult;
+  markHeatStarted: (eventId: string, heatId: string, startedAt?: string) => ActionResult;
   setHydrated: (value: boolean) => void;
 };
 
@@ -85,6 +109,7 @@ function migrateEvent(event: HyroxEvent, fallbackOrganizerId: string): HyroxEven
     organizerId: event.organizerId ?? fallbackOrganizerId,
     segments: event.segments?.length ? event.segments : cloneHyroxSegments(event.id),
     categories: migrateEventCategories(event),
+    heats: event.heats ?? [],
   };
 }
 
@@ -308,6 +333,74 @@ export const useEventsStore = create<EventsState>()(
           const message = error instanceof Error ? error.message : 'Erro inesperado';
           return { ok: false, reason: message };
         }
+      },
+      deleteEvent: async (eventId) => {
+        const event = get().events.find((e) => e.id === eventId);
+        const auth = assertEventCreator(event);
+        if (!auth.ok) return auth;
+
+        set((state) => ({ events: state.events.filter((e) => e.id !== eventId) }));
+        const { athletes, pairs } = useAthletesStore.getState();
+        useAthletesStore.setState({
+          athletes: athletes.filter((a) => a.eventId !== eventId),
+          pairs: pairs.filter((p) => p.eventId !== eventId),
+        });
+
+        if (event && isSupabaseConfigured()) {
+          const result = await deleteEventInSupabase(event);
+          if (!result.ok) {
+            return { ok: false, reason: result.reason };
+          }
+        }
+        return { ok: true };
+      },
+      addHeat: (eventId, input) => {
+        const event = get().events.find((e) => e.id === eventId);
+        const auth = assertEventCreator(event);
+        if (!auth.ok) return auth;
+        const heat: EventHeat = {
+          id: `${eventId}-heat-${Date.now()}`,
+          name: input.name.trim(),
+          scheduledStartAt: input.scheduledStartAt,
+          categoryIds: input.categoryIds ?? [],
+          bibNumbers: input.bibNumbers ?? [],
+          startedAt: null,
+        };
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            heats: [...(e.heats ?? []), heat],
+          })),
+        }));
+        return { ok: true };
+      },
+      removeHeat: (eventId, heatId) => {
+        const event = get().events.find((e) => e.id === eventId);
+        const auth = assertEventCreator(event);
+        if (!auth.ok) return auth;
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            heats: (e.heats ?? []).filter((h) => h.id !== heatId),
+          })),
+        }));
+        return { ok: true };
+      },
+      markHeatStarted: (eventId, heatId, startedAt) => {
+        const event = get().events.find((e) => e.id === eventId);
+        if (!event || event.status === 'finished') {
+          return { ok: false, reason: 'Evento não disponível' };
+        }
+        const at = startedAt ?? new Date().toISOString();
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            heats: (e.heats ?? []).map((h) =>
+              h.id === heatId ? { ...h, startedAt: at } : h,
+            ),
+          })),
+        }));
+        return { ok: true };
       },
     }),
     {
