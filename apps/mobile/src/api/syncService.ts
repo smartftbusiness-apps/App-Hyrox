@@ -18,6 +18,7 @@ import type { RepositoryResult } from '@/src/api/repositoryTypes';
 import { dbIdFromLocalId, isUuid, localIdFromDb, resolveDbId } from '@/src/api/repositoryTypes';
 import { getTemplateSegmentIdByOrder } from '@/src/api/segmentTemplate';
 import { useAthletesStore } from '@/src/stores/athletesStore';
+import { useCloudStatusStore } from '@/src/stores/cloudStatusStore';
 import { useEventsStore } from '@/src/stores/eventsStore';
 
 type DbEvent = {
@@ -136,18 +137,10 @@ function segmentTimesFromDb(
   }));
 }
 
-export async function pullOrganizerDataFromSupabase(
-  organizerId: string,
-): Promise<{ events: HyroxEvent[]; athletes: Athlete[]; pairs: DoublesPair[] } | null> {
-  if (!isSupabaseConfigured()) return null;
-
-  const { data: eventRows, error: eventsError } = await getSupabase()
-    .from('events')
-    .select('id, organizer_id, name, event_date, location, status')
-    .eq('organizer_id', organizerId)
-    .order('event_date', { ascending: false });
-
-  if (eventsError || !eventRows?.length) {
+async function loadBundleFromDbEvents(
+  eventRows: DbEvent[],
+): Promise<{ events: HyroxEvent[]; athletes: Athlete[]; pairs: DoublesPair[] }> {
+  if (!eventRows.length) {
     return { events: [], athletes: [], pairs: [] };
   }
 
@@ -251,6 +244,107 @@ export async function pullOrganizerDataFromSupabase(
   }
 
   return { events, athletes, pairs };
+}
+
+export async function pullOrganizerDataFromSupabase(
+  organizerId: string,
+): Promise<{ events: HyroxEvent[]; athletes: Athlete[]; pairs: DoublesPair[] } | null> {
+  if (!isSupabaseConfigured()) return null;
+
+  const { data: eventRows, error: eventsError } = await getSupabase()
+    .from('events')
+    .select('id, organizer_id, name, event_date, location, status')
+    .eq('organizer_id', organizerId)
+    .order('event_date', { ascending: false });
+
+  if (eventsError) {
+    throw new Error(eventsError.message);
+  }
+
+  return loadBundleFromDbEvents((eventRows ?? []) as DbEvent[]);
+}
+
+/** Eventos públicos: inscrições abertas, ao vivo ou encerrados (RLS permite leitura) */
+export async function pullPublicEventsFromSupabase(): Promise<{
+  events: HyroxEvent[];
+  athletes: Athlete[];
+  pairs: DoublesPair[];
+}> {
+  if (!isSupabaseConfigured()) {
+    return { events: [], athletes: [], pairs: [] };
+  }
+
+  const { data: eventRows, error } = await getSupabase()
+    .from('events')
+    .select('id, organizer_id, name, event_date, location, status')
+    .in('status', ['open', 'live', 'finished'])
+    .order('event_date', { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return loadBundleFromDbEvents((eventRows ?? []) as DbEvent[]);
+}
+
+export type PublicSyncResult =
+  | { ok: true; eventCount: number }
+  | { ok: false; reason: string };
+
+export async function pullAndMergePublicEvents(): Promise<PublicSyncResult> {
+  const cloud = await useCloudStatusStore.getState().checkCloud();
+  if (cloud === 'not_configured') {
+    return { ok: false, reason: 'Este app não está configurado para a nuvem.' };
+  }
+  if (cloud === 'offline') {
+    return {
+      ok: false,
+      reason: 'Nuvem indisponível no momento. Tente de novo em alguns minutos.',
+    };
+  }
+
+  try {
+    const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs } =
+      await pullPublicEventsFromSupabase();
+
+    const publicIds = new Set(dbEvents.map((e) => e.id));
+
+    useEventsStore.setState((state) => {
+      const kept = state.events.filter(
+        (e) => !e.supabaseId && !publicIds.has(e.id) && e.status === 'draft',
+      );
+      const merged = dbEvents.map((remote) => {
+        const existing = state.events.find(
+          (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
+        );
+        return existing ? { ...remote, id: existing.id, segments: existing.segments } : remote;
+      });
+      return { events: [...merged, ...kept] };
+    });
+
+    const eventIds = new Set(useEventsStore.getState().events.map((e) => e.id));
+
+    const events = useEventsStore.getState().events;
+    const localDraftEventIds = new Set(
+      events.filter((e) => e.status === 'draft' && !e.supabaseId).map((e) => e.id),
+    );
+
+    useAthletesStore.setState((state) => ({
+      athletes: [
+        ...dbAthletes.filter((a) => eventIds.has(a.eventId)),
+        ...state.athletes.filter((a) => localDraftEventIds.has(a.eventId)),
+      ],
+      pairs: [
+        ...dbPairs.filter((p) => eventIds.has(p.eventId)),
+        ...state.pairs.filter((p) => localDraftEventIds.has(p.eventId)),
+      ],
+    }));
+
+    return { ok: true, eventCount: dbEvents.length };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Erro ao buscar eventos';
+    return { ok: false, reason: message };
+  }
 }
 
 export async function pullAndMergeFromSupabase(organizerId: string): Promise<void> {

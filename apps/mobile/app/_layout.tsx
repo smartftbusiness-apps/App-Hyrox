@@ -4,7 +4,11 @@ import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect } from 'react';
 import 'react-native-reanimated';
 import { HyroxTheme } from '@/constants/Theme';
+import { pullAndMergePublicEvents } from '@/src/api/syncService';
 import { hydrateAuthStore } from '@/src/stores/authStore';
+import { useAccessModeStore } from '@/src/stores/accessModeStore';
+import { useCloudStatusStore } from '@/src/stores/cloudStatusStore';
+import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { hydrateAthletesStore, syncAthletesWithEvents } from '@/src/stores/athletesStore';
 import { hydrateEventsStore, useEventsStore } from '@/src/stores/eventsStore';
 
@@ -51,6 +55,14 @@ export default function RootLayout() {
     Promise.all([hydrateEventsStore(), hydrateAthletesStore()])
       .then(() => syncAthletesWithEvents())
       .then(() => hydrateAuthStore())
+      .then(async () => {
+        if (isSupabaseConfigured()) {
+          await useCloudStatusStore.getState().checkCloud();
+        }
+        if (useAccessModeStore.getState().isViewer()) {
+          await pullAndMergePublicEvents().catch(() => undefined);
+        }
+      })
       .catch(() => {
         useEventsStore.getState().setHydrated(true);
       });
