@@ -1,8 +1,13 @@
 import { router } from 'expo-router';
+import { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
+import { pullAndMergeFromSupabase } from '@/src/api/syncService';
+import { isSupabaseConfigured } from '@/src/lib/supabase';
+import { useAuthStore } from '@/src/stores/authStore';
 import { useAthletesStore } from '@/src/stores/athletesStore';
 import { useEvents } from '@/src/stores/eventsStore';
 
@@ -23,14 +28,60 @@ const STATUS_LABELS: Record<string, string> = {
 export default function EventsScreen() {
   const events = useEvents();
   const allAthletes = useAthletesStore((s) => s.athletes);
+  const user = useAuthStore((s) => s.user);
+  const [syncing, setSyncing] = useState(false);
+  const supabaseOn = isSupabaseConfigured();
 
   const liveCount = events.filter((e) => e.status === 'live').length;
   const totalAthletes = allAthletes.length;
+
+  async function handleSync() {
+    if (!user?.id) {
+      router.push('/auth');
+      return;
+    }
+    setSyncing(true);
+    try {
+      await pullAndMergeFromSupabase(user.id);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   return (
     <Screen scroll>
       <Text style={styles.heading}>Eventos</Text>
       <Text style={styles.subheading}>Gerencie competições Hyrox</Text>
+
+      {supabaseOn && (
+        <Card
+          title={user ? 'Supabase conectado' : 'Conectar Supabase'}
+          subtitle={
+            user
+              ? `${user.email} — dados sincronizam ao salvar`
+              : 'Faça login para gravar eventos na nuvem'
+          }
+          badge={user ? 'Online' : 'Offline'}
+          badgeColor={user ? HyroxTheme.success + '33' : HyroxTheme.warning + '33'}>
+          <View style={styles.syncRow}>
+            <Button
+              label={user ? (syncing ? 'Sincronizando…' : 'Baixar da nuvem') : 'Entrar'}
+              variant="secondary"
+              disabled={syncing}
+              onPress={handleSync}
+              style={styles.syncBtn}
+            />
+            {user ? (
+              <Button
+                label="Sair"
+                variant="secondary"
+                onPress={() => useAuthStore.getState().signOut()}
+                style={styles.syncBtn}
+              />
+            ) : null}
+          </View>
+        </Card>
+      )}
 
       <View style={styles.statsRow}>
         <View style={styles.stat}>
@@ -128,5 +179,13 @@ const styles = StyleSheet.create({
   footerText: {
     color: HyroxTheme.textMuted,
     fontSize: 13,
+  },
+  syncRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 4,
+  },
+  syncBtn: {
+    flex: 1,
   },
 });

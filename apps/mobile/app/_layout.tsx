@@ -4,6 +4,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect } from 'react';
 import 'react-native-reanimated';
 import { HyroxTheme } from '@/constants/Theme';
+import { hydrateAuthStore } from '@/src/stores/authStore';
 import { hydrateAthletesStore, syncAthletesWithEvents } from '@/src/stores/athletesStore';
 import { hydrateEventsStore, useEventsStore } from '@/src/stores/eventsStore';
 
@@ -49,6 +50,7 @@ export default function RootLayout() {
   useEffect(() => {
     Promise.all([hydrateEventsStore(), hydrateAthletesStore()])
       .then(() => syncAthletesWithEvents())
+      .then(() => hydrateAuthStore())
       .catch(() => {
         useEventsStore.getState().setHydrated(true);
       });
@@ -63,6 +65,14 @@ export default function RootLayout() {
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="event/[id]" options={{ headerShown: false }} />
+        <Stack.Screen
+          name="auth"
+          options={{
+            headerStyle: { backgroundColor: HyroxTheme.surface },
+            headerTintColor: HyroxTheme.text,
+            title: 'Conta organizador',
+          }}
+        />
         <Stack.Screen
           name="event/new"
           options={{

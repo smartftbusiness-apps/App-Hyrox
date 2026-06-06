@@ -15,6 +15,8 @@ export type Gender = 'M' | 'F' | 'Mixed';
 
 export interface Category {
   id: string;
+  /** UUID em `categories` no Supabase */
+  supabaseId?: string | null;
   name: string;
   division: Division;
   gender: Gender;
@@ -36,6 +38,8 @@ export interface HyroxEvent {
 
 export interface Athlete {
   id: string;
+  /** UUID em `athletes` no Supabase */
+  supabaseId?: string | null;
   eventId: string;
   name: string;
   bib: number;
@@ -49,6 +53,8 @@ export interface Athlete {
 /** Dupla Hyrox — dois atletas, um bib, uma categoria Doubles */
 export interface DoublesPair {
   id: string;
+  /** UUID em `doubles_pairs` no Supabase */
+  supabaseId?: string | null;
   eventId: string;
   categoryId: string;
   bib: number;

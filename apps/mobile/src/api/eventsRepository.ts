@@ -1,21 +1,8 @@
 import type { EventStatus, HyroxEvent } from '@/src/domain/types';
 import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
-
-const HYROX_TEMPLATE_ID = '00000000-0000-0000-0000-000000000001';
-
-export type RepositoryResult<T = void> =
-  | { ok: true; data?: T }
-  | { ok: false; reason: string };
-
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-}
-
-function resolveDbEventId(event: HyroxEvent): string | null {
-  if (event.supabaseId && isUuid(event.supabaseId)) return event.supabaseId;
-  if (isUuid(event.id)) return event.id;
-  return null;
-}
+import type { RepositoryResult } from '@/src/api/repositoryTypes';
+import { isUuid, resolveDbId } from '@/src/api/repositoryTypes';
+import { HYROX_TEMPLATE_ID } from '@/src/api/segmentTemplate';
 
 async function requireAuthUserId(): Promise<RepositoryResult<string>> {
   const { data, error } = await getSupabase().auth.getUser();
@@ -27,6 +14,10 @@ async function requireAuthUserId(): Promise<RepositoryResult<string>> {
     };
   }
   return { ok: true, data: data.user.id };
+}
+
+function resolveDbEventId(event: HyroxEvent): string | null {
+  return resolveDbId(event);
 }
 
 export async function ensureEventInSupabase(event: HyroxEvent): Promise<RepositoryResult<string>> {
@@ -83,3 +74,5 @@ export async function updateEventStatusInSupabase(
 export async function finishEventInSupabase(event: HyroxEvent): Promise<RepositoryResult<string>> {
   return updateEventStatusInSupabase(event, 'finished');
 }
+
+export { isUuid };
