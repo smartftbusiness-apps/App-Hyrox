@@ -13,6 +13,7 @@ import { buildCategoryName } from '@/src/utils/categoryLabel';
 import { useOrganizerStore } from '@/src/stores/organizerStore';
 import { useAthletesStore } from '@/src/stores/athletesStore';
 import { createEventInSupabase, finishEventInSupabase } from '@/src/api/eventsRepository';
+import { pushEventToSupabase, scheduleEventSync } from '@/src/api/syncService';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
 
@@ -162,6 +163,7 @@ export const useEventsStore = create<EventsState>()(
             set((state) => ({
               events: patchEvent(state.events, id, (e) => ({ ...e, supabaseId: result.data })),
             }));
+            scheduleEventSync(id);
           });
         }
 
@@ -184,6 +186,7 @@ export const useEventsStore = create<EventsState>()(
             categories: [...e.categories, category],
           })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       removeCategory: (eventId, categoryId) => {
@@ -248,6 +251,7 @@ export const useEventsStore = create<EventsState>()(
         set((state) => ({
           events: patchEvent(state.events, eventId, (e) => ({ ...e, status })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       finishEvent: async (eventId) => {
@@ -274,6 +278,7 @@ export const useEventsStore = create<EventsState>()(
 
           try {
             const dbResult = await finishEventInSupabase({ ...event!, status: 'finished' });
+            void pushEventToSupabase(eventId);
             if (!dbResult.ok) {
               return {
                 ok: true,

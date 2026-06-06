@@ -10,6 +10,7 @@ import { useAthletesByEvent, usePairsByEvent } from '@/src/stores/athletesStore'
 import { getDoublesCategories } from '@/src/utils/categoryHelpers';
 import { groupEventParticipants } from '@/src/utils/participantHelpers';
 import { useEvent, useIsEventOwner } from '@/src/hooks/useEvent';
+import { useIsViewerMode } from '@/src/stores/accessModeStore';
 import { useRouteId } from '@/src/hooks/useRouteId';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
@@ -21,6 +22,7 @@ export default function EventDetailScreen() {
   const id = useRouteId();
   const event = useEvent(id);
   const isOwner = useIsEventOwner(event);
+  const isViewer = useIsViewerMode();
   const updateEventStatus = useEventsStore((s) => s.updateEventStatus);
   const finishEvent = useEventsStore((s) => s.finishEvent);
   const [finishing, setFinishing] = useState(false);
@@ -48,7 +50,7 @@ export default function EventDetailScreen() {
     pairs.filter((p) => p.status === 'racing').length;
   const finished = finishReadiness.finishedCount;
   const stationCount = event.segments.filter((s) => s.type === 'station').length;
-  const canEdit = isOwner && !isFinished;
+  const canEdit = isOwner && !isFinished && !isViewer;
   const canEditParticipants = canEdit;
   const finishBlockReason = getFinishEventBlockReason(finishReadiness);
 

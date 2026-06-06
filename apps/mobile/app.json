@@ -8,9 +8,11 @@
     "scheme": "apphyrox",
     "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.smartftbusiness.apphyrox"
     },
     "android": {
+      "package": "com.smartftbusiness.apphyrox",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -37,6 +39,13 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "c291b443-8b2c-417a-aa15-8f05a308a381"
+      }
+    },
+    "owner": "hyrox-app1"
   }
 }

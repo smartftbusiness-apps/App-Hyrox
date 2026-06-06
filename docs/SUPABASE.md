@@ -61,12 +61,18 @@ Em **Authentication** → **Providers**, habilite **Email** para organizadores f
 
 Ao criar um usuário, o trigger `handle_new_user` cria automaticamente um registro em `profiles`.
 
-Com `.env` configurado, o app grava no Supabase:
+Com `.env` configurado e **login** na tela Eventos → **Entrar**, o app sincroniza:
 
-- **Criar evento** → insert em `events` (guarda `supabaseId` localmente)
-- **Encerrar evento** → `update events set status = 'finished'`
+| Ação no app | Tabela(s) Supabase |
+|-------------|-------------------|
+| Criar evento | `events`, `categories` |
+| Alterar status | `events` |
+| Inscrever atletas / duplas | `athletes`, `doubles_pairs` |
+| Cronometrar / finalizar | `athlete_runs`, `pair_runs`, `segment_times`, `pair_segment_times` |
+| Encerrar evento | `events.status = finished` |
+| Baixar da nuvem | Lê todas as tabelas acima do organizador logado |
 
-Sem sessão autenticada no Supabase, o encerramento falha com mensagem de erro (RLS exige usuário logado).
+Sem sessão autenticada, o app funciona offline (dados locais), mas não grava no banco (RLS exige usuário logado).
 
 ## 6. Via CLI (alternativa)
 
