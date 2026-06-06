@@ -6,7 +6,11 @@ import type { AppUserRole } from '@/src/domain/appRole';
 
 import { fromSupabaseProfileRole, toSupabaseProfileRole } from '@/src/domain/appRole';
 
-import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
+import {
+  clearSupabaseAuthStorage,
+  getSupabase,
+  isSupabaseConfigured,
+} from '@/src/lib/supabase';
 
 import { pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
 
@@ -158,7 +162,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     const supabase = getSupabase();
 
-    const { data } = await supabase.auth.getSession();
+    let data: Awaited<ReturnType<typeof supabase.auth.getSession>>['data'];
+    try {
+      ({ data } = await supabase.auth.getSession());
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.toLowerCase() : '';
+      if (msg.includes('invalid api key') || msg.includes('jwt')) {
+        await clearSupabaseAuthStorage();
+        ({ data } = await supabase.auth.getSession());
+      } else {
+        throw err;
+      }
+    }
 
     const session = data.session ?? null;
 
@@ -337,19 +352,17 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
 
   signOut: async () => {
-
     if (isSupabaseConfigured()) {
-
-      await getSupabase().auth.signOut();
-
+      try {
+        await getSupabase().auth.signOut();
+      } catch {
+        // ignore — limpa storage local abaixo
+      }
     }
-
+    await clearSupabaseAuthStorage();
     useAccessModeStore.getState().setAppRole('organizer');
-
     useEventStaffStore.getState().clear();
-
     set({ session: null, user: null });
-
   },
 
   resetPassword: async (email) => {
