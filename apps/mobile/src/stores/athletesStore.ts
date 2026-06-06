@@ -4,8 +4,13 @@ import { useShallow } from 'zustand/react/shallow';
 import type { Athlete, AthleteStatus, DoublesPair, SegmentTime } from '@/src/domain/types';
 import { MOCK_ATHLETES, MOCK_PAIRS } from '@/src/data/mockData';
 import { getSafeStorage } from '@/src/storage/safeStorage';
+import { scheduleEventSync } from '@/src/api/syncService';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { useOrganizerStore } from '@/src/stores/organizerStore';
+
+function syncEvent(eventId: string): void {
+  scheduleEventSync(eventId);
+}
 
 export type AddAthleteInput = {
   name: string;
@@ -155,6 +160,7 @@ export const useAthletesStore = create<AthletesState>()(
         };
 
         set((state) => ({ athletes: [...state.athletes, athlete] }));
+        syncEvent(eventId);
         return { ok: true };
       },
       removeAthlete: (eventId, athleteId) => {
@@ -169,6 +175,7 @@ export const useAthletesStore = create<AthletesState>()(
         set((state) => ({
           athletes: state.athletes.filter((a) => !(a.id === athleteId && a.eventId === eventId)),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       updateAthleteName: (eventId, athleteId, name) => {
@@ -184,6 +191,7 @@ export const useAthletesStore = create<AthletesState>()(
             a.id === athleteId && a.eventId === eventId ? { ...a, name: trimmed } : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       updateAthleteBib: (eventId, athleteId, bib) => {
@@ -208,6 +216,7 @@ export const useAthletesStore = create<AthletesState>()(
             a.id === athleteId && a.eventId === eventId ? { ...a, bib } : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       updateAthleteCategory: (eventId, athleteId, categoryId) => {
@@ -237,6 +246,7 @@ export const useAthletesStore = create<AthletesState>()(
               : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       updatePairTeamName: (eventId, pairId, teamName) => {
@@ -253,6 +263,7 @@ export const useAthletesStore = create<AthletesState>()(
               : p,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       updatePairBib: (eventId, pairId, bib) => {
@@ -280,6 +291,7 @@ export const useAthletesStore = create<AthletesState>()(
             a.pairId === pairId && a.eventId === eventId ? { ...a, bib } : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       updatePairCategory: (eventId, pairId, categoryId) => {
@@ -303,6 +315,7 @@ export const useAthletesStore = create<AthletesState>()(
             a.pairId === pairId && a.eventId === eventId ? { ...a, categoryId } : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       setParticipantStatus: (eventId, participantId, type, status) => {
@@ -317,6 +330,7 @@ export const useAthletesStore = create<AthletesState>()(
               a.id === participantId && a.eventId === eventId ? { ...a, status } : a,
             ),
           }));
+          syncEvent(eventId);
           return { ok: true };
         }
 
@@ -330,6 +344,7 @@ export const useAthletesStore = create<AthletesState>()(
             a.pairId === participantId && a.eventId === eventId ? { ...a, status } : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       recordParticipantFinish: (eventId, participantId, type, totalMs, segmentTimes = []) => {
@@ -348,6 +363,7 @@ export const useAthletesStore = create<AthletesState>()(
                 : a,
             ),
           }));
+          syncEvent(eventId);
           return { ok: true };
         }
 
@@ -365,6 +381,7 @@ export const useAthletesStore = create<AthletesState>()(
               : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       createPair: (eventId, input) => {
@@ -418,6 +435,7 @@ export const useAthletesStore = create<AthletesState>()(
               : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       addDoublesTeam: (eventId, input) => {
@@ -474,6 +492,7 @@ export const useAthletesStore = create<AthletesState>()(
             (a) => a.id !== pair.athlete1Id && a.id !== pair.athlete2Id,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
       dissolvePair: (eventId, pairId) => {
@@ -491,6 +510,7 @@ export const useAthletesStore = create<AthletesState>()(
               : a,
           ),
         }));
+        syncEvent(eventId);
         return { ok: true };
       },
     }),
