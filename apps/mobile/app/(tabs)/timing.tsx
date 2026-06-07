@@ -1,6 +1,6 @@
 import { router } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 import { Button } from '@/components/ui/Button';
 import { Screen } from '@/components/ui/Screen';
 import { SegmentProgress } from '@/components/SegmentProgress';
@@ -11,18 +11,25 @@ import { useAthletesByEvent, useAthletesStore, usePairsByEvent } from '@/src/sto
 import { useEventStaffStore } from '@/src/stores/eventStaffStore';
 import { useEvents, useEventsStore } from '@/src/stores/eventsStore';
 import { useOrganizerStore } from '@/src/stores/organizerStore';
-import type { TimingParticipant } from '@/src/utils/participantHelpers';
-import { buildTimingParticipants, participantsForHeat } from '@/src/utils/participantHelpers';
+import {
+  assignedParticipantsForHeat,
+  buildTimingParticipants,
+  participantsForHeat,
+  type TimingParticipant,
+} from '@/src/utils/participantHelpers';
 import { formatMs } from '@/src/utils/formatTime';
+import { fetchAndApplyLiveRuns, startLiveRunInCloud } from '@/src/api/liveTimingRepository';
+import { pullEventParticipantsLive, pushEventToSupabase } from '@/src/api/syncService';
+import { isSupabaseConfigured } from '@/src/lib/supabase';
 import {
   advanceSegment,
   addPenalty,
   createTimingRun,
+  createTimingRunAt,
   getSegmentMs,
   getTotalMs,
   isSegmentRunning,
   participantKey,
-  toggleSegmentRun,
   type TimingRunState,
 } from '@/src/utils/timingRun';
 
@@ -33,6 +40,11 @@ function canControlEventTiming(event: HyroxEvent): boolean {
 }
 
 export default function TimingScreen() {
+  const { width } = useWindowDimensions();
+  const contentWidth = Math.min(width, 720);
+  const narrow = contentWidth < 380;
+  const compact = contentWidth < 420;
+  const wide = contentWidth >= 720;
   const events = useEvents();
   const markHeatStarted = useEventsStore((s) => s.markHeatStarted);
   const timingEvents = useMemo(
@@ -55,6 +67,9 @@ export default function TimingScreen() {
 
   const eventId = pickedEventId ?? timingEvents[0]?.id ?? '';
   const selectedEvent = timingEvents.find((e) => e.id === eventId);
+  const isOrganizer = useOrganizerStore((s) =>
+    selectedEvent ? s.isEventOwner(selectedEvent.organizerId) : false,
+  );
   const athletes = useAthletesByEvent(eventId || undefined);
   const pairs = usePairsByEvent(eventId || undefined);
 
@@ -64,19 +79,55 @@ export default function TimingScreen() {
   }, [athletes, pairs, selectedEvent]);
 
   const segments = selectedEvent?.segments ?? [];
-  const activeRun = activeKey ? runs[activeKey] : undefined;
-  const activeParticipant = activeRun?.participant;
 
-  const runList = useMemo(
-    () => Object.values(runs).sort((a, b) => a.participant.bib - b.participant.bib),
-    [runs],
+  const runList = useMemo(() => {
+    const byKey = new Map<string, TimingRunState>();
+    for (const run of Object.values(runs)) {
+      byKey.set(participantKey(run.participant), run);
+    }
+    for (const p of participants) {
+      if (p.status !== 'racing') continue;
+      const key = participantKey(p);
+      const startedMs = p.racingStartedAt ? new Date(p.racingStartedAt).getTime() : Date.now();
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, createTimingRunAt(p, startedMs));
+        continue;
+      }
+      if (p.racingStartedAt) {
+        const remoteStart = new Date(p.racingStartedAt).getTime();
+        if (remoteStart < existing.raceStartedAt) {
+          const delta = existing.raceStartedAt - remoteStart;
+          byKey.set(key, {
+            ...existing,
+            participant: p,
+            raceStartedAt: remoteStart,
+            segmentStartedAt: existing.segmentStartedAt
+              ? existing.segmentStartedAt - delta
+              : remoteStart,
+          });
+        } else {
+          byKey.set(key, { ...existing, participant: p });
+        }
+      }
+    }
+    return [...byKey.values()].sort((a, b) => a.participant.bib - b.participant.bib);
+  }, [runs, participants]);
+
+  const activeRun = useMemo(
+    () =>
+      activeKey
+        ? runList.find((r) => participantKey(r.participant) === activeKey)
+        : undefined,
+    [activeKey, runList],
   );
+  const activeParticipant = activeRun?.participant;
 
   const availableParticipants = useMemo(() => {
     const q = search.toLowerCase().trim();
     return participants.filter((p) => {
       const key = participantKey(p);
-      if (runs[key]) return false;
+      if (runs[key] || p.status === 'racing') return false;
       if (p.status === 'finished') return false;
       if (!q) return true;
       return (
@@ -91,6 +142,32 @@ export default function TimingScreen() {
     const id = setInterval(() => setNow(Date.now()), 100);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (!eventId || !isSupabaseConfigured()) return;
+    const syncLive = async () => {
+      await pullEventParticipantsLive(eventId);
+      await fetchAndApplyLiveRuns(eventId);
+    };
+    void syncLive();
+    const id = setInterval(() => void syncLive(), 2000);
+    return () => clearInterval(id);
+  }, [eventId]);
+
+  useEffect(() => {
+    setRuns((prev) => {
+      let next = { ...prev };
+      let changed = false;
+      for (const run of runList) {
+        const key = participantKey(run.participant);
+        if (!next[key]) {
+          next[key] = run;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [runList]);
 
   function handleEventChange(id: string) {
     setPickedEventId(id);
@@ -107,7 +184,7 @@ export default function TimingScreen() {
     });
   }
 
-  function startParticipant(participant: TimingParticipant) {
+  async function startParticipant(participant: TimingParticipant) {
     if (!eventId) return;
     const key = participantKey(participant);
     if (runs[key]) {
@@ -117,11 +194,23 @@ export default function TimingScreen() {
     setRuns((prev) => ({ ...prev, [key]: createTimingRun(participant) }));
     setActiveKey(key);
     const result = setParticipantStatus(eventId, participant.id, participant.type, 'racing');
-    if (!result.ok) Alert.alert('Cronômetro', result.reason);
+    if (!result.ok) {
+      Alert.alert('Cronômetro', result.reason);
+      return;
+    }
+    if (selectedEvent) {
+      try {
+        await pushEventToSupabase(eventId);
+        const freshEvent = useEventsStore.getState().events.find((e) => e.id === eventId);
+        await startLiveRunInCloud(freshEvent ?? selectedEvent, participant);
+      } catch {
+        // mantém cronômetro local mesmo se a nuvem falhar
+      }
+    }
   }
 
   function startHeat(heatId: string) {
-    if (!eventId || !selectedEvent) return;
+    if (!eventId || !selectedEvent || !isOrganizer) return;
     const heat = (selectedEvent.heats ?? []).find((h) => h.id === heatId);
     if (!heat) return;
     const mark = markHeatStarted(eventId, heatId);
@@ -131,7 +220,10 @@ export default function TimingScreen() {
     }
     const batch = participantsForHeat(participants, heat);
     if (batch.length === 0) {
-      Alert.alert('Bateria', 'Nenhum participante elegível nesta bateria.');
+      Alert.alert(
+        'Bateria',
+        'Nenhum atleta vinculado a esta bateria. O organizador deve vincular atletas em Baterias.',
+      );
       return;
     }
     for (const p of batch) {
@@ -141,6 +233,10 @@ export default function TimingScreen() {
 
   function selectActive(key: string) {
     setActiveKey(key);
+    const picked = runList.find((r) => participantKey(r.participant) === key);
+    if (picked) {
+      setRuns((prev) => (prev[key] ? prev : { ...prev, [key]: picked }));
+    }
   }
 
   function stopTracking(key: string) {
@@ -154,11 +250,6 @@ export default function TimingScreen() {
       });
       return next;
     });
-  }
-
-  function handleToggleSegment() {
-    if (!activeKey) return;
-    updateRun(activeKey, (run) => toggleSegmentRun(run, now));
   }
 
   function handleNextSegment() {
@@ -200,6 +291,89 @@ export default function TimingScreen() {
     goToRanking(eventId, participant.categoryId);
   }
 
+  function renderActiveTimer() {
+    if (!activeRun || !activeParticipant) return null;
+
+    const segment = segments[activeRun.segmentIndex];
+    const segmentMs = getSegmentMs(activeRun, now);
+    const totalMs = getTotalMs(activeRun, now);
+    const segmentRunning = isSegmentRunning(activeRun);
+
+    return (
+      <View style={styles.timerSection}>
+        {activeRun.raceComplete ? (
+          <View style={styles.finishedCard}>
+            <Text style={[styles.finishedTitle, narrow && styles.finishedTitleCompact]}>
+              Prova finalizada
+            </Text>
+            <Text style={[styles.finishedTime, narrow && styles.finishedTimeCompact]}>
+              {formatMs(totalMs)}
+            </Text>
+            <Text style={styles.finishedSub}>
+              #{activeParticipant.bib} {activeParticipant.label}
+            </Text>
+            <Button
+              label="Salvar tempo no ranking"
+              onPress={handleSaveFinish}
+              large
+              style={{ marginTop: 16, width: '100%' }}
+            />
+          </View>
+        ) : (
+          <>
+            <View style={styles.participantBanner}>
+              <Text style={styles.athlete} numberOfLines={2}>
+                #{activeParticipant.bib} {activeParticipant.label}
+              </Text>
+              <Text style={styles.athleteMeta} numberOfLines={1}>
+                {selectedEvent?.name} · {activeParticipant.categoryName}
+              </Text>
+            </View>
+
+            {segments.length > 0 && segment ? (
+              <>
+                <View style={styles.segmentProgressWrap}>
+                  <SegmentProgress
+                    segments={segments}
+                    currentIndex={activeRun.segmentIndex}
+                    completedIndices={activeRun.completed}
+                  />
+                </View>
+
+                <View style={styles.timerCard}>
+                  <TimerDisplay
+                    elapsedMs={segmentMs}
+                    segmentName={segment.name}
+                    segmentTarget={segment.target}
+                    segmentType={segment.type}
+                    segmentIndex={segment.order}
+                    totalSegments={segments.length}
+                  />
+                  <View style={styles.totalRow}>
+                    <Text style={styles.totalLabel}>Tempo total</Text>
+                    <Text style={styles.totalValue}>{formatMs(totalMs)}</Text>
+                  </View>
+                </View>
+
+                <Button
+                  label="Próximo segmento →"
+                  onPress={handleNextSegment}
+                  disabled={segmentMs === 0 && !segmentRunning}
+                  large
+                  style={{ marginBottom: 8 }}
+                />
+
+                <Button label="+2 min penalidade" variant="danger" onPress={handlePenalty} />
+              </>
+            ) : (
+              <Text style={styles.empty}>Este evento não tem segmentos configurados.</Text>
+            )}
+          </>
+        )}
+      </View>
+    );
+  }
+
   if (events.length === 0) {
     return (
       <Screen>
@@ -221,59 +395,8 @@ export default function TimingScreen() {
     );
   }
 
-  const segment = activeRun ? segments[activeRun.segmentIndex] : undefined;
-  const segmentMs = activeRun ? getSegmentMs(activeRun, now) : 0;
-  const totalMs = activeRun ? getTotalMs(activeRun, now) : 0;
-  const segmentRunning = activeRun ? isSegmentRunning(activeRun) : false;
-
-  return (
-    <Screen scroll>
-      <Text style={styles.heading}>Cronômetro</Text>
-      <Text style={styles.subheading}>
-        Juiz — inicie vários participantes e alterne entre eles. Os tempos continuam rodando.
-      </Text>
-
-      <Text style={styles.label}>Evento</Text>
-      <View style={styles.chipRow}>
-        {timingEvents.map((event) => (
-          <Pressable
-            key={event.id}
-            style={[styles.chip, eventId === event.id && styles.chipActive]}
-            onPress={() => handleEventChange(event.id)}>
-            <Text
-              style={[styles.chipText, eventId === event.id && styles.chipTextActive]}
-              numberOfLines={1}>
-              {event.name}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-
-      {(selectedEvent?.heats ?? []).length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Baterias</Text>
-          {(selectedEvent?.heats ?? []).map((heat) => (
-            <View key={heat.id} style={styles.heatRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.participantName}>{heat.name}</Text>
-                <Text style={styles.participantMeta}>
-                  {new Date(heat.scheduledStartAt).toLocaleTimeString('pt-BR', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                  {heat.startedAt ? ' · iniciada' : ''}
-                </Text>
-              </View>
-              <Button
-                label={heat.startedAt ? 'Reiniciar' : 'Iniciar bateria'}
-                variant="primary"
-                onPress={() => startHeat(heat.id)}
-              />
-            </View>
-          ))}
-        </View>
-      )}
-
+  const sidebar = (
+    <>
       {runList.length > 0 && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Em prova ({runList.length})</Text>
@@ -284,120 +407,78 @@ export default function TimingScreen() {
             return (
               <Pressable
                 key={key}
-                style={[styles.runRow, isActive && styles.runRowActive]}
+                style={[
+                  styles.runRow,
+                  compact && styles.runRowCompact,
+                  isActive && styles.runRowActive,
+                ]}
                 onPress={() => selectActive(key)}>
-                <Text style={styles.participantBib}>#{run.participant.bib}</Text>
+                <Text style={[styles.participantBib, compact && styles.participantBibCompact]}>
+                  #{run.participant.bib}
+                </Text>
                 <View style={styles.participantInfo}>
                   <Text style={styles.participantName} numberOfLines={1}>
                     {run.participant.label}
                   </Text>
-                  <Text style={styles.participantMeta} numberOfLines={1}>
+                  <Text style={styles.participantMeta} numberOfLines={compact ? 2 : 1}>
                     {run.participant.type === 'pair' ? 'Dupla' : 'Individual'} ·{' '}
                     {run.participant.categoryName}
                     {run.raceComplete ? ' · Aguardando salvar' : ''}
                   </Text>
                 </View>
-                <Text style={styles.liveTime}>{formatMs(liveTotal)}</Text>
+                <Text style={[styles.liveTime, compact && styles.liveTimeCompact]}>
+                  {formatMs(liveTotal)}
+                </Text>
               </Pressable>
             );
           })}
         </View>
       )}
 
-      {activeRun && activeParticipant && (
-        <View style={styles.timerSection}>
-          {activeRun.raceComplete ? (
-            <View style={styles.finishedCard}>
-              <Text style={styles.finishedTitle}>Prova finalizada</Text>
-              <Text style={styles.finishedTime}>{formatMs(totalMs)}</Text>
-              <Text style={styles.finishedSub}>
-                #{activeParticipant.bib} {activeParticipant.label}
-              </Text>
-              <Button
-                label="Salvar tempo no ranking"
-                onPress={handleSaveFinish}
-                large
-                style={{ marginTop: 16, width: '100%' }}
-              />
-            </View>
-          ) : (
-            <>
-              <View style={styles.participantBanner}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.athlete}>
-                    #{activeParticipant.bib} {activeParticipant.label}
-                  </Text>
-                  <Text style={styles.athleteMeta}>
-                    {selectedEvent?.name} · {activeParticipant.categoryName}
-                  </Text>
-                </View>
-              </View>
-
-              {segments.length > 0 && segment && (
-                <>
-                  <SegmentProgress
-                    segments={segments}
-                    currentIndex={activeRun.segmentIndex}
-                    completedIndices={activeRun.completed}
-                  />
-
-                  <View style={styles.timerCard}>
-                    <TimerDisplay
-                      elapsedMs={segmentMs}
-                      segmentName={segment.name}
-                      segmentTarget={segment.target}
-                      segmentType={segment.type}
-                      segmentIndex={segment.order}
-                      totalSegments={segments.length}
-                    />
-                    <View style={styles.totalRow}>
-                      <Text style={styles.totalLabel}>Tempo total</Text>
-                      <Text style={styles.totalValue}>{formatMs(totalMs)}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.actions}>
-                    <Button
-                      label={
-                        segmentRunning
-                          ? 'Pausar segmento'
-                          : segmentMs > 0
-                            ? 'Retomar segmento'
-                            : 'Iniciar segmento'
-                      }
-                      onPress={handleToggleSegment}
-                      large
-                      style={styles.actionBtn}
-                    />
-                    <Button
-                      label="Próximo segmento →"
-                      variant="secondary"
-                      onPress={handleNextSegment}
-                      disabled={segmentMs === 0 && !segmentRunning}
-                      large
-                      style={styles.actionBtn}
-                    />
-                  </View>
-
-                  <Button
-                    label="+2 min penalidade"
-                    variant="danger"
-                    onPress={handlePenalty}
-                    style={{ marginTop: 8 }}
-                  />
-                </>
-              )}
-
-              {segments.length === 0 && (
-                <Text style={styles.empty}>Este evento não tem segmentos configurados.</Text>
-              )}
-            </>
-          )}
-        </View>
-      )}
-
       {!activeRun && runList.length > 0 && (
         <Text style={styles.hint}>Toque em um participante na lista para ver o cronômetro.</Text>
+      )}
+
+      {(selectedEvent?.heats ?? []).length > 0 && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Baterias</Text>
+          {!isOrganizer && (
+            <Text style={styles.hint}>
+              Apenas o organizador pode iniciar baterias. Você pode iniciar participantes
+              individualmente abaixo.
+            </Text>
+          )}
+          {(selectedEvent?.heats ?? []).map((heat) => {
+            const assigned = assignedParticipantsForHeat(participants, heat);
+            return (
+              <View key={heat.id} style={styles.heatCard}>
+                <Text style={styles.participantName}>{heat.name}</Text>
+                <Text style={styles.participantMeta}>
+                  {new Date(heat.scheduledStartAt).toLocaleTimeString('pt-BR', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                  {heat.startedAt ? ' · iniciada' : ''}
+                  {' · '}
+                  {assigned.length} atleta{assigned.length === 1 ? '' : 's'}
+                </Text>
+                {assigned.length > 0 && (
+                  <Text style={styles.heatAthletes}>
+                    {assigned.map((p) => `#${p.bib} ${p.label}`).join(' · ')}
+                  </Text>
+                )}
+                {isOrganizer && (
+                  <Button
+                    label={heat.startedAt ? 'Reiniciar bateria' : 'Iniciar bateria'}
+                    variant="primary"
+                    onPress={() => startHeat(heat.id)}
+                    style={{ marginTop: 10, width: '100%' }}
+                  />
+                )}
+              </View>
+            );
+          })}
+        </View>
       )}
 
       <View style={styles.section}>
@@ -415,16 +496,26 @@ export default function TimingScreen() {
         )}
 
         {availableParticipants.map((p) => (
-          <View key={participantKey(p)} style={styles.participantRow}>
-            <Text style={styles.participantBib}>#{p.bib}</Text>
-            <View style={styles.participantInfo}>
-              <Text style={styles.participantName}>{p.label}</Text>
-              <Text style={styles.participantMeta}>
-                {p.type === 'pair' ? `Dupla · ${p.memberNames.join(' + ')}` : 'Individual'} ·{' '}
-                {p.categoryName}
+          <View
+            key={participantKey(p)}
+            style={[styles.participantRow, compact && styles.participantRowCompact]}>
+            <View style={styles.participantRowMain}>
+              <Text style={[styles.participantBib, compact && styles.participantBibCompact]}>
+                #{p.bib}
               </Text>
+              <View style={styles.participantInfo}>
+                <Text style={styles.participantName} numberOfLines={1}>
+                  {p.label}
+                </Text>
+                <Text style={styles.participantMeta} numberOfLines={2}>
+                  {p.type === 'pair' ? `Dupla · ${p.memberNames.join(' + ')}` : 'Individual'} ·{' '}
+                  {p.categoryName}
+                </Text>
+              </View>
             </View>
-            <Pressable style={styles.startBtn} onPress={() => startParticipant(p)}>
+            <Pressable
+              style={[styles.startBtn, compact && styles.startBtnFull]}
+              onPress={() => startParticipant(p)}>
               <Text style={styles.startBtnText}>Iniciar</Text>
             </Pressable>
           </View>
@@ -434,13 +525,59 @@ export default function TimingScreen() {
           <Text style={styles.hint}>Todos os participantes filtrados já estão em prova.</Text>
         )}
       </View>
+    </>
+  );
+
+  return (
+    <Screen scroll>
+      <View style={[styles.page, wide && styles.pageWide]}>
+        <View style={[styles.mainColumn, wide && styles.mainColumnWide]}>
+          <Text style={[styles.heading, narrow && styles.headingCompact]}>Cronômetro</Text>
+          <Text style={styles.subheading}>
+            Controle os tempos dos participantes. Somente o organizador inicia as baterias; juízes
+            cronometram atletas individualmente.
+          </Text>
+
+          <Text style={styles.label}>Evento</Text>
+          <View style={styles.chipRow}>
+            {timingEvents.map((event) => (
+              <Pressable
+                key={event.id}
+                style={[styles.chip, eventId === event.id && styles.chipActive]}
+                onPress={() => handleEventChange(event.id)}>
+                <Text
+                  style={[styles.chipText, eventId === event.id && styles.chipTextActive]}
+                  numberOfLines={1}>
+                  {event.name}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+
+          {renderActiveTimer()}
+        </View>
+
+        <View style={[styles.sideColumn, wide && styles.sideColumnWide]}>{sidebar}</View>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  page: { width: '100%', maxWidth: '100%', alignSelf: 'stretch' },
+  pageWide: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'flex-start',
+    gap: 20,
+  },
+  mainColumn: { width: '100%', flex: 1, minWidth: 0, maxWidth: '100%' },
+  mainColumnWide: { flex: 1.1, minWidth: 280, maxWidth: '100%' },
+  sideColumn: { width: '100%', flex: 1, minWidth: 0, maxWidth: '100%' },
+  sideColumnWide: { flex: 1, minWidth: 280, maxWidth: '100%' },
   heading: { color: HyroxTheme.text, fontSize: 28, fontWeight: '800' },
-  subheading: { color: HyroxTheme.textMuted, fontSize: 14, marginTop: 4, marginBottom: 16 },
+  headingCompact: { fontSize: 24 },
+  subheading: { color: HyroxTheme.textMuted, fontSize: 14, marginTop: 4, marginBottom: 16, lineHeight: 20 },
   label: { color: HyroxTheme.text, fontSize: 14, fontWeight: '600', marginBottom: 8 },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 16 },
   chip: {
@@ -464,7 +601,8 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
-  timerSection: { marginBottom: 20 },
+  timerSection: { marginBottom: 20, width: '100%', maxWidth: '100%' },
+  segmentProgressWrap: { width: '100%', maxWidth: '100%', overflow: 'hidden' },
   search: {
     backgroundColor: HyroxTheme.surface,
     borderWidth: 1,
@@ -486,10 +624,15 @@ const styles = StyleSheet.create({
     padding: 12,
     marginBottom: 8,
     gap: 10,
+    width: '100%',
+    maxWidth: '100%',
   },
   runRowActive: {
     borderColor: HyroxTheme.accent,
     backgroundColor: 'rgba(255, 237, 0, 0.08)',
+  },
+  runRowCompact: {
+    flexWrap: 'wrap',
   },
   participantRow: {
     flexDirection: 'row',
@@ -501,9 +644,23 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 8,
     gap: 10,
+    width: '100%',
+    maxWidth: '100%',
   },
-  participantBib: { color: HyroxTheme.accent, fontWeight: '800', fontSize: 14, width: 48 },
-  participantInfo: { flex: 1 },
+  participantRowCompact: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  participantRowMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    minWidth: 0,
+  },
+  participantBib: { color: HyroxTheme.accent, fontWeight: '800', fontSize: 14, minWidth: 44 },
+  participantBibCompact: { minWidth: 36, fontSize: 13 },
+  participantInfo: { flex: 1, minWidth: 0 },
   participantName: { color: HyroxTheme.text, fontSize: 15, fontWeight: '600' },
   participantMeta: { color: HyroxTheme.textMuted, fontSize: 12, marginTop: 2 },
   liveTime: {
@@ -511,12 +668,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
+    flexShrink: 0,
   },
+  liveTimeCompact: { fontSize: 12 },
   startBtn: {
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
     backgroundColor: HyroxTheme.accent,
+    alignSelf: 'flex-start',
+  },
+  startBtnFull: {
+    alignSelf: 'stretch',
+    alignItems: 'center',
   },
   startBtnText: { color: '#000', fontSize: 12, fontWeight: '800' },
   participantBanner: {
@@ -535,6 +699,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: HyroxTheme.border,
     marginBottom: 16,
+    width: '100%',
+    overflow: 'hidden',
   },
   totalRow: {
     flexDirection: 'row',
@@ -552,8 +718,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
   },
-  actions: { gap: 10 },
-  actionBtn: { width: '100%' },
   finishedCard: {
     alignItems: 'center',
     padding: 20,
@@ -563,6 +727,7 @@ const styles = StyleSheet.create({
     borderColor: HyroxTheme.border,
   },
   finishedTitle: { color: HyroxTheme.text, fontSize: 20, fontWeight: '800' },
+  finishedTitleCompact: { fontSize: 18 },
   finishedTime: {
     color: HyroxTheme.accent,
     fontSize: 40,
@@ -570,15 +735,19 @@ const styles = StyleSheet.create({
     marginTop: 12,
     fontVariant: ['tabular-nums'],
   },
-  finishedSub: { color: HyroxTheme.textMuted, fontSize: 14, marginTop: 8 },
+  finishedTimeCompact: { fontSize: 32 },
+  finishedSub: { color: HyroxTheme.textMuted, fontSize: 14, marginTop: 8, textAlign: 'center' },
   hint: { color: HyroxTheme.textMuted, fontSize: 13, marginBottom: 12, lineHeight: 18 },
   empty: { color: HyroxTheme.textMuted, textAlign: 'center', marginTop: 12 },
-  heatRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: HyroxTheme.border,
+  heatCard: {
+    padding: 12,
+    marginBottom: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: HyroxTheme.border,
+    backgroundColor: HyroxTheme.surface,
+    width: '100%',
+    maxWidth: '100%',
   },
+  heatAthletes: { color: HyroxTheme.textMuted, fontSize: 12, marginTop: 6, lineHeight: 18 },
 });

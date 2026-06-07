@@ -23,15 +23,21 @@ export function participantKey(p: Pick<TimingParticipant, 'id' | 'type'>): strin
 }
 
 export function createTimingRun(participant: TimingParticipant): TimingRunState {
-  const now = Date.now();
+  return createTimingRunAt(participant, Date.now());
+}
+
+export function createTimingRunAt(
+  participant: TimingParticipant,
+  raceStartedAt: number,
+): TimingRunState {
   return {
     participant,
     segmentIndex: 0,
     completed: [],
     segmentTimes: [],
     segmentBaseMs: 0,
-    segmentStartedAt: now,
-    raceStartedAt: now,
+    segmentStartedAt: raceStartedAt,
+    raceStartedAt,
     penaltiesMs: 0,
     raceComplete: false,
     frozenTotalMs: 0,

@@ -34,7 +34,7 @@ import { useRouteId } from '@/src/hooks/useRouteId';
 
 import { useEventStaffStore, type EventStaffMember } from '@/src/stores/eventStaffStore';
 
-
+const EMPTY_STAFF: EventStaffMember[] = [];
 
 export default function EventJudgesScreen() {
 
@@ -49,8 +49,8 @@ export default function EventJudgesScreen() {
   const [loading, setLoading] = useState(false);
 
   const staff = useEventStaffStore((s) =>
-    eventId ? (s.staffByEvent[eventId] ?? []) : [],
-  );
+    eventId ? s.staffByEvent[eventId] : undefined,
+  ) ?? EMPTY_STAFF;
 
   const loadStaff = useCallback(async () => {
     if (!eventId || !event?.supabaseId) return;
@@ -80,23 +80,28 @@ export default function EventJudgesScreen() {
 
 
   if (!perms.canManageJudges) {
-
     return (
-
       <>
-
         <Stack.Screen options={{ title: 'Juízes' }} />
-
-        <Screen>
-
-          <Text style={styles.denied}>Somente o organizador pode designar juízes.</Text>
-
+        <Screen scroll>
+          <Text style={styles.heading}>Juízes do evento</Text>
+          <Text style={styles.subheading}>
+            Equipe com acesso de leitura e cronômetro neste evento.
+          </Text>
+          {staff.length === 0 ? (
+            <Card title="Nenhum juiz" subtitle="Nenhum juiz designado para este evento." />
+          ) : (
+            staff.map((member) => (
+              <Card
+                key={member.id}
+                title={member.fullName || 'Juiz'}
+                subtitle={member.email || `ID ${member.userId.slice(0, 8)}…`}
+              />
+            ))
+          )}
         </Screen>
-
       </>
-
     );
-
   }
 
 
@@ -166,11 +171,8 @@ export default function EventJudgesScreen() {
         <Text style={styles.heading}>Designar juízes</Text>
 
         <Text style={styles.subheading}>
-
-          Juízes têm leitura do evento e podem controlar o cronômetro. Eles precisam ter conta com
-
-          perfil Juiz no app.
-
+          Juízes têm leitura do evento e podem controlar o cronômetro. O juiz precisa criar conta
+          com perfil Juiz, confirmar o e-mail e o evento deve estar sincronizado na nuvem.
         </Text>
 
 

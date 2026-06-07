@@ -12,6 +12,7 @@ import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { EventNotFound } from '@/components/EventNotFound';
 import { buildCategoryName, genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
+import { confirmAsync } from '@/src/utils/confirm';
 
 const DIVISIONS: { value: Division; label: string }[] = [
   { value: 'Open', label: 'Open' },
@@ -57,15 +58,18 @@ export default function CategoriesScreen() {
     setCustomName('');
   }
 
-  function handleRemove(categoryId: string, name: string) {
-    Alert.alert('Remover categoria', `Remover "${name}"?`, [
-      { text: 'Cancelar', style: 'cancel' },
-      {
-        text: 'Remover',
-        style: 'destructive',
-        onPress: () => removeCategory(eventId, categoryId),
-      },
-    ]);
+  async function handleRemove(categoryId: string, name: string) {
+    const confirmed = await confirmAsync(
+      'Remover categoria',
+      `Remover "${name}"?`,
+      'Remover',
+    );
+    if (!confirmed) return;
+
+    const result = removeCategory(eventId, categoryId);
+    if (!result.ok) {
+      Alert.alert('Não foi possível', result.reason);
+    }
   }
 
   const previewName = customName.trim() || buildCategoryName(division, gender);

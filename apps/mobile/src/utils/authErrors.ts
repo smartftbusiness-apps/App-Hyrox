@@ -16,6 +16,15 @@ export function translateAuthError(message: string): string {
   if (lower.includes('unable to validate email')) {
     return 'E-mail inválido. Verifique se digitou corretamente.';
   }
+  if (lower.includes('email rate limit exceeded')) {
+    return 'Limite de e-mails do Supabase atingido. Aguarde cerca de 1 hora ou use Entrar se a conta já foi criada. O organizador pode confirmar o e-mail manualmente no painel do Supabase.';
+  }
+  if (lower.includes('request path invalid') || lower.includes('redirect')) {
+    return 'Link de confirmação inválido. No Supabase, em Authentication → URL Configuration, adicione apphyrox://auth em Redirect URLs e use Site URL https://cnrxzckicablcanuqwva.supabase.co';
+  }
+  if (lower.includes('jwt') || lower.includes('invalid api key')) {
+    return 'Chave do Supabase inválida neste APK. Desinstale o app, instale o build mais recente e tente de novo.';
+  }
 
   return message;
 }

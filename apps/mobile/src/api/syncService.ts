@@ -20,6 +20,8 @@ import { getTemplateSegmentIdByOrder } from '@/src/api/segmentTemplate';
 import { useAthletesStore } from '@/src/stores/athletesStore';
 import { useEventStaffStore } from '@/src/stores/eventStaffStore';
 import { useEventsStore } from '@/src/stores/eventsStore';
+import { fetchAndApplyLiveRuns } from '@/src/api/liveTimingRepository';
+import { dedupeEvents } from '@/src/utils/dedupeEvents';
 
 type DbEvent = {
   id: string;
@@ -63,6 +65,7 @@ type DbAthleteRun = {
   id: string;
   athlete_id: string;
   event_id: string;
+  started_at: string | null;
   total_ms: number | null;
   status: string;
 };
@@ -71,6 +74,7 @@ type DbPairRun = {
   id: string;
   pair_id: string;
   event_id: string;
+  started_at: string | null;
   total_ms: number | null;
   status: string;
 };
@@ -88,6 +92,208 @@ type DbPairSegmentTime = {
 };
 
 const syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function mergeEventsLocalRemote(remote: HyroxEvent, existing: HyroxEvent): HyroxEvent {
+  const categoryBySupabase = new Map(
+    existing.categories.filter((c) => c.supabaseId).map((c) => [c.supabaseId!, c]),
+  );
+  const mergedCategories = remote.categories.map((rc) => {
+    const match = rc.supabaseId ? categoryBySupabase.get(rc.supabaseId) : undefined;
+    return match ? { ...rc, id: match.id } : rc;
+  });
+
+  return {
+    ...remote,
+    id: existing.id,
+    segments: existing.segments,
+    heats: existing.heats ?? remote.heats,
+    categories: mergedCategories,
+  };
+}
+
+function buildMergedEventLookup(mergedEvents: HyroxEvent[]): {
+  eventIdRemap: Map<string, string>;
+  categoryIdRemap: Map<string, string>;
+} {
+  const eventIdRemap = new Map<string, string>();
+  const categoryIdRemap = new Map<string, string>();
+
+  for (const event of mergedEvents) {
+    if (event.supabaseId) {
+      eventIdRemap.set(localIdFromDb('evt', event.supabaseId), event.id);
+      eventIdRemap.set(event.supabaseId, event.id);
+    }
+    eventIdRemap.set(event.id, event.id);
+
+    for (const cat of event.categories) {
+      if (cat.supabaseId) {
+        categoryIdRemap.set(localIdFromDb('cat', cat.supabaseId), cat.id);
+        categoryIdRemap.set(cat.supabaseId, cat.id);
+      }
+      categoryIdRemap.set(cat.id, cat.id);
+    }
+  }
+
+  return { eventIdRemap, categoryIdRemap };
+}
+
+function remapRemoteAthlete(
+  athlete: Athlete,
+  eventIdRemap: Map<string, string>,
+  categoryIdRemap: Map<string, string>,
+): Athlete {
+  return {
+    ...athlete,
+    eventId: eventIdRemap.get(athlete.eventId) ?? athlete.eventId,
+    categoryId: categoryIdRemap.get(athlete.categoryId) ?? athlete.categoryId,
+  };
+}
+
+function remapRemotePair(
+  pair: DoublesPair,
+  eventIdRemap: Map<string, string>,
+  categoryIdRemap: Map<string, string>,
+  athleteIdRemap: Map<string, string>,
+): DoublesPair {
+  return {
+    ...pair,
+    eventId: eventIdRemap.get(pair.eventId) ?? pair.eventId,
+    categoryId: categoryIdRemap.get(pair.categoryId) ?? pair.categoryId,
+    athlete1Id: athleteIdRemap.get(pair.athlete1Id) ?? pair.athlete1Id,
+    athlete2Id: athleteIdRemap.get(pair.athlete2Id) ?? pair.athlete2Id,
+  };
+}
+
+function mergeAthletesAfterPull(
+  localAthletes: Athlete[],
+  remoteAthletes: Athlete[],
+  mergedEvents: HyroxEvent[],
+): Athlete[] {
+  const { eventIdRemap, categoryIdRemap } = buildMergedEventLookup(mergedEvents);
+  const remappedRemote = remoteAthletes.map((a) =>
+    remapRemoteAthlete(a, eventIdRemap, categoryIdRemap),
+  );
+
+  const syncedEventIds = new Set(
+    mergedEvents.filter((e) => e.supabaseId).map((e) => e.id),
+  );
+  const localOnlyEventIds = new Set(
+    mergedEvents.filter((e) => !e.supabaseId).map((e) => e.id),
+  );
+  const pulledEventIds = new Set(mergedEvents.map((e) => e.id));
+
+  const localBySupabaseId = new Map(
+    localAthletes
+      .filter((a) => resolveDbId(a))
+      .map((a) => [resolveDbId(a)!, a]),
+  );
+
+  const mergedRemote = remappedRemote.map((remote) => {
+    const dbId = resolveDbId(remote);
+    const existing = dbId ? localBySupabaseId.get(dbId) : undefined;
+    if (existing) {
+      return { ...remote, id: existing.id, pairId: existing.pairId ?? remote.pairId };
+    }
+    return remote;
+  });
+
+  const remoteDbIds = new Set(
+    mergedRemote.map((a) => resolveDbId(a)).filter((id): id is string => !!id),
+  );
+
+  const keptLocal = localAthletes.filter((a) => {
+    if (!pulledEventIds.has(a.eventId)) return true;
+    if (localOnlyEventIds.has(a.eventId)) return true;
+    if (!syncedEventIds.has(a.eventId)) return true;
+    if (!resolveDbId(a)) return true;
+    return !remoteDbIds.has(resolveDbId(a)!);
+  });
+
+  const byId = new Map<string, Athlete>();
+  for (const athlete of [...mergedRemote, ...keptLocal]) {
+    byId.set(athlete.id, athlete);
+  }
+  return [...byId.values()];
+}
+
+function mergePairsAfterPull(
+  localPairs: DoublesPair[],
+  remotePairs: DoublesPair[],
+  mergedEvents: HyroxEvent[],
+  mergedAthletes: Athlete[],
+): DoublesPair[] {
+  const { eventIdRemap, categoryIdRemap } = buildMergedEventLookup(mergedEvents);
+
+  const athleteIdRemap = new Map<string, string>();
+  for (const athlete of mergedAthletes) {
+    athleteIdRemap.set(athlete.id, athlete.id);
+    if (athlete.supabaseId) {
+      athleteIdRemap.set(localIdFromDb('ath', athlete.supabaseId), athlete.id);
+      athleteIdRemap.set(athlete.supabaseId, athlete.id);
+    }
+  }
+
+  const remappedRemote = remotePairs.map((p) =>
+    remapRemotePair(p, eventIdRemap, categoryIdRemap, athleteIdRemap),
+  );
+
+  const syncedEventIds = new Set(
+    mergedEvents.filter((e) => e.supabaseId).map((e) => e.id),
+  );
+  const localOnlyEventIds = new Set(
+    mergedEvents.filter((e) => !e.supabaseId).map((e) => e.id),
+  );
+  const pulledEventIds = new Set(mergedEvents.map((e) => e.id));
+
+  const localBySupabaseId = new Map(
+    localPairs.filter((p) => resolveDbId(p)).map((p) => [resolveDbId(p)!, p]),
+  );
+
+  const mergedRemote = remappedRemote.map((remote) => {
+    const dbId = resolveDbId(remote);
+    const existing = dbId ? localBySupabaseId.get(dbId) : undefined;
+    return existing ? { ...remote, id: existing.id } : remote;
+  });
+
+  const remoteDbIds = new Set(
+    mergedRemote.map((p) => resolveDbId(p)).filter((id): id is string => !!id),
+  );
+
+  const keptLocal = localPairs.filter((p) => {
+    if (!pulledEventIds.has(p.eventId)) return true;
+    if (localOnlyEventIds.has(p.eventId)) return true;
+    if (!syncedEventIds.has(p.eventId)) return true;
+    if (!resolveDbId(p)) return true;
+    return !remoteDbIds.has(resolveDbId(p)!);
+  });
+
+  const byId = new Map<string, DoublesPair>();
+  for (const pair of [...mergedRemote, ...keptLocal]) {
+    byId.set(pair.id, pair);
+  }
+  return [...byId.values()];
+}
+
+function applyMergedParticipants(
+  localAthletes: Athlete[],
+  localPairs: DoublesPair[],
+  remoteAthletes: Athlete[],
+  remotePairs: DoublesPair[],
+  mergedEvents: HyroxEvent[],
+): { athletes: Athlete[]; pairs: DoublesPair[] } {
+  const athletes = mergeAthletesAfterPull(localAthletes, remoteAthletes, mergedEvents);
+  const pairs = mergePairsAfterPull(localPairs, remotePairs, mergedEvents, athletes);
+  return { athletes, pairs };
+}
+
+async function pushOrganizerPendingEvents(organizerId: string): Promise<void> {
+  const events = useEventsStore
+    .getState()
+    .events.filter((e) => e.organizerId === organizerId || !e.supabaseId);
+  for (const event of events) {
+    await pushEventToSupabase(event.id);
+  }
+}
 
 function mapDbEvent(row: DbEvent): HyroxEvent {
   const localId = localIdFromDb('evt', row.id);
@@ -205,6 +411,8 @@ async function loadBundleFromDbEvents(
     if (row.pair_id) pairLocalByDb.set(row.pair_id, pairLocalId!);
 
     const run = athleteRuns.find((r) => r.athlete_id === row.id);
+    const isLiveRun = run?.status === 'in_progress';
+    const status = isLiveRun || row.status === 'racing' ? 'racing' : row.status;
     return {
       id: localAthleteId,
       supabaseId: row.id,
@@ -213,9 +421,13 @@ async function loadBundleFromDbEvents(
       bib: row.bib_number,
       categoryId: row.category_id ? catLocalByDb.get(row.category_id) ?? '' : '',
       pairId: pairLocalId,
-      status: row.status,
-      totalMs: run?.total_ms ?? null,
-      segmentTimes: segmentTimesFromDb(athleteRuns, segmentTimes, row.id, localEventId, false),
+      status,
+      racingStartedAt: isLiveRun ? run?.started_at ?? null : null,
+      totalMs: run?.status === 'finished' ? run?.total_ms ?? null : null,
+      segmentTimes:
+        run?.status === 'finished'
+          ? segmentTimesFromDb(athleteRuns, segmentTimes, row.id, localEventId, false)
+          : [],
     };
   });
 
@@ -224,6 +436,8 @@ async function loadBundleFromDbEvents(
     const localPairId = localIdFromDb('pair', row.id);
     pairLocalByDb.set(row.id, localPairId);
     const run = pairRuns.find((r) => r.pair_id === row.id);
+    const isLiveRun = run?.status === 'in_progress';
+    const status = isLiveRun || row.status === 'racing' ? 'racing' : row.status;
     return {
       id: localPairId,
       supabaseId: row.id,
@@ -233,9 +447,13 @@ async function loadBundleFromDbEvents(
       athlete1Id: localIdFromDb('ath', row.athlete1_id),
       athlete2Id: localIdFromDb('ath', row.athlete2_id),
       teamName: row.team_name ?? undefined,
-      status: row.status,
-      totalMs: run?.total_ms ?? null,
-      segmentTimes: segmentTimesFromDb(pairRuns, pairSegmentTimes, row.id, localEventId, true),
+      status,
+      racingStartedAt: isLiveRun ? run?.started_at ?? null : null,
+      totalMs: run?.status === 'finished' ? run?.total_ms ?? null : null,
+      segmentTimes:
+        run?.status === 'finished'
+          ? segmentTimesFromDb(pairRuns, pairSegmentTimes, row.id, localEventId, true)
+          : [],
     };
   });
 
@@ -274,14 +492,23 @@ export async function pullJudgeAssignedData(userId: string): Promise<{
     return { events: [], athletes: [], pairs: [], assignedLocalIds: [] };
   }
 
-  const { data: staffRows, error: staffError } = await getSupabase()
-    .from('event_staff')
-    .select('event_id')
-    .eq('user_id', userId);
+  let eventDbIds: string[] = [];
 
-  if (staffError) throw new Error(staffError.message);
+  const { data: rpcIds, error: rpcError } = await getSupabase().rpc(
+    'list_my_assigned_event_ids',
+  );
 
-  const eventDbIds = [...new Set((staffRows ?? []).map((r) => r.event_id as string))];
+  if (!rpcError && rpcIds) {
+    eventDbIds = [...new Set((rpcIds as string[]).filter(Boolean))];
+  } else {
+    const { data: staffRows, error: staffError } = await getSupabase()
+      .from('event_staff')
+      .select('event_id')
+      .eq('user_id', userId);
+
+    if (staffError) throw new Error(staffError.message);
+    eventDbIds = [...new Set((staffRows ?? []).map((r) => r.event_id as string))];
+  }
   if (!eventDbIds.length) {
     return { events: [], athletes: [], pairs: [], assignedLocalIds: [] };
   }
@@ -305,40 +532,42 @@ export type JudgeSyncResult = { ok: true } | { ok: false; reason: string };
 
 export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSyncResult> {
   try {
-    const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs, assignedLocalIds } =
+    const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs } =
       await pullJudgeAssignedData(userId);
 
-    useEventStaffStore.getState().setAssignedEventIds(assignedLocalIds);
-
     const remoteIds = new Set(dbEvents.map((e) => e.id));
-
-    useEventsStore.setState((state) => {
-      const kept = state.events.filter(
-        (e) => !remoteIds.has(e.id) && !assignedLocalIds.includes(e.id),
+    const eventState = useEventsStore.getState();
+    const merged = dbEvents.map((remote) => {
+      const existing = eventState.events.find(
+        (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
       );
-      const merged = dbEvents.map((remote) => {
-        const existing = state.events.find(
-          (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
-        );
-        return existing
-          ? { ...remote, id: existing.id, segments: existing.segments, heats: existing.heats }
-          : remote;
-      });
-      return { events: [...merged, ...kept.filter((e) => !assignedLocalIds.includes(e.id))] };
+      return existing ? mergeEventsLocalRemote(remote, existing) : remote;
+    });
+    const mergedLocalIds = new Set(merged.map((e) => e.id));
+    const mergedSupabaseIds = new Set(
+      merged.map((e) => e.supabaseId).filter((id): id is string => !!id),
+    );
+    const kept = eventState.events.filter((e) => {
+      if (mergedLocalIds.has(e.id)) return false;
+      if (e.supabaseId && mergedSupabaseIds.has(e.supabaseId)) return false;
+      if (remoteIds.has(e.id)) return false;
+      return true;
     });
 
-    const eventIds = new Set(assignedLocalIds);
+    useEventsStore.setState({
+      events: dedupeEvents([...merged, ...kept]),
+    });
+    useEventStaffStore.getState().setAssignedEventIds([...mergedLocalIds]);
 
-    useAthletesStore.setState((state) => ({
-      athletes: [
-        ...dbAthletes.filter((a) => eventIds.has(a.eventId)),
-        ...state.athletes.filter((a) => !eventIds.has(a.eventId)),
-      ],
-      pairs: [
-        ...dbPairs.filter((p) => eventIds.has(p.eventId)),
-        ...state.pairs.filter((p) => !eventIds.has(p.eventId)),
-      ],
-    }));
+    const athleteState = useAthletesStore.getState();
+    const { athletes, pairs } = applyMergedParticipants(
+      athleteState.athletes,
+      athleteState.pairs,
+      dbAthletes,
+      dbPairs,
+      merged,
+    );
+    useAthletesStore.setState({ athletes, pairs });
 
     return { ok: true };
   } catch (err) {
@@ -384,37 +613,28 @@ export async function pullAndMergePublicEvents(): Promise<PublicSyncResult> {
       await pullPublicEventsFromSupabase();
 
     const publicIds = new Set(dbEvents.map((e) => e.id));
-
-    useEventsStore.setState((state) => {
-      const kept = state.events.filter(
-        (e) => !e.supabaseId && !publicIds.has(e.id) && e.status === 'draft',
+    const eventState = useEventsStore.getState();
+    const kept = eventState.events.filter(
+      (e) => !e.supabaseId && !publicIds.has(e.id) && e.status === 'draft',
+    );
+    const mergedRemote = dbEvents.map((remote) => {
+      const existing = eventState.events.find(
+        (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
       );
-      const merged = dbEvents.map((remote) => {
-        const existing = state.events.find(
-          (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
-        );
-        return existing ? { ...remote, id: existing.id, segments: existing.segments } : remote;
-      });
-      return { events: [...merged, ...kept] };
+      return existing ? mergeEventsLocalRemote(remote, existing) : remote;
     });
 
-    const eventIds = new Set(useEventsStore.getState().events.map((e) => e.id));
+    useEventsStore.setState({ events: dedupeEvents([...mergedRemote, ...kept]) });
 
-    const events = useEventsStore.getState().events;
-    const localDraftEventIds = new Set(
-      events.filter((e) => e.status === 'draft' && !e.supabaseId).map((e) => e.id),
+    const athleteState = useAthletesStore.getState();
+    const { athletes, pairs } = applyMergedParticipants(
+      athleteState.athletes,
+      athleteState.pairs,
+      dbAthletes,
+      dbPairs,
+      mergedRemote,
     );
-
-    useAthletesStore.setState((state) => ({
-      athletes: [
-        ...dbAthletes.filter((a) => eventIds.has(a.eventId)),
-        ...state.athletes.filter((a) => localDraftEventIds.has(a.eventId)),
-      ],
-      pairs: [
-        ...dbPairs.filter((p) => eventIds.has(p.eventId)),
-        ...state.pairs.filter((p) => localDraftEventIds.has(p.eventId)),
-      ],
-    }));
+    useAthletesStore.setState({ athletes, pairs });
 
     return { ok: true, eventCount: dbEvents.length };
   } catch (err) {
@@ -423,45 +643,61 @@ export async function pullAndMergePublicEvents(): Promise<PublicSyncResult> {
   }
 }
 
+/** Atualiza atletas/duplas de um evento (status racing + início na nuvem). */
+export async function pullEventParticipantsLive(localEventId: string): Promise<void> {
+  const event = useEventsStore.getState().events.find((e) => e.id === localEventId);
+  if (!event?.supabaseId || !isSupabaseConfigured()) return;
+
+  const { data, error } = await getSupabase()
+    .from('events')
+    .select('id, organizer_id, name, event_date, location, status')
+    .eq('id', event.supabaseId)
+    .maybeSingle();
+
+  if (error || !data) return;
+
+  const bundle = await loadBundleFromDbEvents([data as DbEvent]);
+  const athleteState = useAthletesStore.getState();
+  const { athletes, pairs } = applyMergedParticipants(
+    athleteState.athletes,
+    athleteState.pairs,
+    bundle.athletes,
+    bundle.pairs,
+    [event],
+  );
+  useAthletesStore.setState({ athletes, pairs });
+  await fetchAndApplyLiveRuns(localEventId);
+}
+
 export async function pullAndMergeFromSupabase(organizerId: string): Promise<void> {
+  await pushOrganizerPendingEvents(organizerId);
+
   const pulled = await pullOrganizerDataFromSupabase(organizerId);
   if (!pulled) return;
 
   const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs } = pulled;
-  useEventsStore.setState((state) => {
-    const localOnly = state.events.filter(
-      (e) =>
-        !e.supabaseId &&
-        !dbIdFromLocalId(e.id) &&
-        e.organizerId === organizerId,
+  const eventState = useEventsStore.getState();
+  const localOnly = eventState.events.filter(
+    (e) => !e.supabaseId && !dbIdFromLocalId(e.id) && e.organizerId === organizerId,
+  );
+  const mergedRemote = dbEvents.map((remote) => {
+    const existing = eventState.events.find(
+      (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
     );
-    const mergedRemote = dbEvents.map((remote) => {
-      const existing = state.events.find(
-        (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
-      );
-      return existing
-        ? { ...remote, id: existing.id, segments: existing.segments }
-        : remote;
-    });
-    return { events: [...mergedRemote, ...localOnly] };
+    return existing ? mergeEventsLocalRemote(remote, existing) : remote;
   });
 
-  const events = useEventsStore.getState().events;
-  const eventIds = new Set(events.map((e) => e.id));
-  const localOnlyEventIds = new Set(
-    events.filter((e) => !e.supabaseId).map((e) => e.id),
-  );
+  useEventsStore.setState({ events: dedupeEvents([...mergedRemote, ...localOnly]) });
 
-  useAthletesStore.setState((state) => ({
-    athletes: [
-      ...dbAthletes.filter((a) => eventIds.has(a.eventId)),
-      ...state.athletes.filter((a) => localOnlyEventIds.has(a.eventId)),
-    ],
-    pairs: [
-      ...dbPairs.filter((p) => eventIds.has(p.eventId)),
-      ...state.pairs.filter((p) => localOnlyEventIds.has(p.eventId)),
-    ],
-  }));
+  const athleteState = useAthletesStore.getState();
+  const { athletes, pairs } = applyMergedParticipants(
+    athleteState.athletes,
+    athleteState.pairs,
+    dbAthletes,
+    dbPairs,
+    mergedRemote,
+  );
+  useAthletesStore.setState({ athletes, pairs });
 }
 
 async function syncCategories(

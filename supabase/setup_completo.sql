@@ -263,23 +263,115 @@ where pr.status = 'finished'
   and pr.total_ms is not null
   and dp.status = 'finished';
 
--- Trigger: criar profile ao registrar usuário
+-- Trigger: criar profile ao registrar usuário (organizer / staff=judge)
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  v_role user_role;
+  v_meta text;
 begin
-  insert into public.profiles (id, full_name)
+  v_meta := coalesce(new.raw_user_meta_data->>'role', 'organizer');
+  v_role := case
+    when v_meta in ('staff', 'judge') then 'staff'::user_role
+    when v_meta = 'viewer' then 'viewer'::user_role
+    else 'organizer'::user_role
+  end;
+
+  insert into public.profiles (id, full_name, role)
   values (
     new.id,
-    coalesce(new.raw_user_meta_data->>'full_name', new.email)
+    coalesce(new.raw_user_meta_data->>'full_name', ''),
+    v_role
   )
-  on conflict (id) do nothing;
+  on conflict (id) do update set
+    full_name = excluded.full_name,
+    role = excluded.role;
+
   return new;
 end;
 $$;
+
+-- Busca usuário por e-mail para designar juízes
+create or replace function public.lookup_profile_id_by_email(p_email text)
+returns uuid
+language sql
+security definer
+set search_path = public
+as $$
+  select id from auth.users where lower(email) = lower(trim(p_email)) limit 1;
+$$;
+
+grant execute on function public.lookup_profile_id_by_email(text) to authenticated;
+
+-- Lista juízes do evento com e-mail (organizador)
+create or replace function public.list_event_staff(p_event_id uuid)
+returns table (
+  id uuid,
+  user_id uuid,
+  email text,
+  full_name text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    es.id,
+    es.user_id,
+    u.email::text,
+    p.full_name
+  from event_staff es
+  join profiles p on p.id = es.user_id
+  join auth.users u on u.id = es.user_id
+  where es.event_id = p_event_id
+    and public.is_event_organizer(p_event_id);
+$$;
+
+grant execute on function public.list_event_staff(uuid) to authenticated;
+
+-- Eventos designados ao juiz logado
+create or replace function public.list_my_assigned_event_ids()
+returns setof uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select event_id from event_staff where user_id = auth.uid();
+$$;
+
+grant execute on function public.list_my_assigned_event_ids() to authenticated;
+
+-- Provas em andamento (cronômetro compartilhado organizador ↔ juiz)
+create or replace function public.list_event_live_runs(p_event_id uuid)
+returns table (
+  participant_kind text,
+  participant_id uuid,
+  started_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select 'athlete'::text, ar.athlete_id, ar.started_at
+  from athlete_runs ar
+  where ar.event_id = p_event_id
+    and ar.status = 'in_progress'
+    and public.can_manage_event(p_event_id)
+  union all
+  select 'pair'::text, pr.pair_id, pr.started_at
+  from pair_runs pr
+  where pr.event_id = p_event_id
+    and pr.status = 'in_progress'
+    and public.can_manage_event(p_event_id);
+$$;
+
+grant execute on function public.list_event_live_runs(uuid) to authenticated;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
@@ -412,8 +504,12 @@ create policy "events_delete_own" on events
 
 -- Event staff
 drop policy if exists "event_staff_manage" on event_staff;
-create policy "event_staff_manage" on event_staff
+drop policy if exists "event_staff_organizer_manage" on event_staff;
+drop policy if exists "event_staff_select_own" on event_staff;
+create policy "event_staff_organizer_manage" on event_staff
   for all using (public.is_event_organizer(event_id));
+create policy "event_staff_select_own" on event_staff
+  for select using (user_id = auth.uid());
 
 -- Categories, athletes, runs, times: quem gerencia o evento
 drop policy if exists "categories_manage" on categories;

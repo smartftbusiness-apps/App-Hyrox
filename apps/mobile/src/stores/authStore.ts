@@ -6,10 +6,12 @@ import type { AppUserRole } from '@/src/domain/appRole';
 
 import { fromSupabaseProfileRole, toSupabaseProfileRole } from '@/src/domain/appRole';
 
+import { getAuthRedirectUrl } from '@/src/lib/authRedirect';
 import {
   clearSupabaseAuthStorage,
   getSupabase,
   isSupabaseConfigured,
+  resetSupabaseClient,
 } from '@/src/lib/supabase';
 
 import { pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
@@ -109,6 +111,16 @@ async function applyProfileRole(userId: string): Promise<void> {
 }
 
 
+
+function isInvalidApiKeyError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes('invalid api key') || lower.includes('invalid jwt');
+}
+
+async function recoverFromInvalidApiKey(): Promise<void> {
+  await clearSupabaseAuthStorage();
+  resetSupabaseClient();
+}
 
 async function syncAfterAuth(userId: string): Promise<string | undefined> {
 
@@ -231,13 +243,18 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     try {
 
-      const { data, error } = await getSupabase().auth.signInWithPassword({
-
+      let { data, error } = await getSupabase().auth.signInWithPassword({
         email: email.trim(),
-
         password,
-
       });
+
+      if (error && isInvalidApiKeyError(error.message)) {
+        await recoverFromInvalidApiKey();
+        ({ data, error } = await getSupabase().auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        }));
+      }
 
       if (error) return { ok: false, reason: translateAuthError(error.message) };
 
@@ -307,15 +324,25 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
 
 
-      const { data, error } = await getSupabase().auth.signUp({
+      const signUpOptions = {
+        data: meta,
+        emailRedirectTo: getAuthRedirectUrl(),
+      };
 
+      let { data, error } = await getSupabase().auth.signUp({
         email: email.trim(),
-
         password,
-
-        options: { data: meta },
-
+        options: signUpOptions,
       });
+
+      if (error && isInvalidApiKeyError(error.message)) {
+        await recoverFromInvalidApiKey();
+        ({ data, error } = await getSupabase().auth.signUp({
+          email: email.trim(),
+          password,
+          options: signUpOptions,
+        }));
+      }
 
       if (error) return { ok: false, reason: translateAuthError(error.message) };
 
@@ -339,7 +366,17 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
       set({ session: data.session, user: data.user });
 
-      return { ok: true };
+      let warning: string | undefined;
+      if (data.user && data.session) {
+        try {
+          await applyProfileRole(data.user.id);
+          warning = await syncAfterAuth(data.user.id);
+        } catch (syncError) {
+          warning = translateSyncError(syncError);
+        }
+      }
+
+      return warning ? { ok: true, warning } : { ok: true };
 
     } finally {
 
@@ -382,7 +419,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     set({ loading: true });
     try {
       const { error } = await getSupabase().auth.resetPasswordForEmail(trimmed, {
-        redirectTo: 'apphyrox://auth',
+        redirectTo: getAuthRedirectUrl(),
       });
       if (error) return { ok: false, reason: translateAuthError(error.message) };
       return {

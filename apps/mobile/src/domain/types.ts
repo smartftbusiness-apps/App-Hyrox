@@ -32,8 +32,10 @@ export interface EventHeat {
   startedAt?: string | null;
   /** Categorias incluídas (vazio = todas) */
   categoryIds: string[];
-  /** Bibs específicos (vazio = todos da categoria) */
+  /** Bibs específicos (espelho dos participantes vinculados) */
   bibNumbers: number[];
+  /** Chaves "athlete:id" ou "pair:id" dos participantes vinculados */
+  participantKeys: string[];
 }
 
 export interface HyroxEvent {
@@ -61,6 +63,8 @@ export interface Athlete {
   categoryId: string;
   pairId?: string | null;
   status: AthleteStatus;
+  /** ISO — início da prova ao vivo (athlete_runs in_progress na nuvem) */
+  racingStartedAt?: string | null;
   totalMs: number | null;
   segmentTimes?: SegmentTime[];
 }
@@ -77,6 +81,8 @@ export interface DoublesPair {
   athlete2Id: string;
   teamName?: string;
   status: AthleteStatus;
+  /** ISO — início da prova ao vivo (pair_runs in_progress na nuvem) */
+  racingStartedAt?: string | null;
   totalMs: number | null;
   segmentTimes?: SegmentTime[];
 }
