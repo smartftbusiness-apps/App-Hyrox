@@ -1,4 +1,5 @@
 import {
+  KeyboardAvoidingView,
   Platform,
   ScrollView,
   StyleSheet,
@@ -6,6 +7,7 @@ import {
   useWindowDimensions,
   type ViewProps,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HyroxTheme } from '@/constants/Theme';
 
 type ScreenProps = ViewProps & {
@@ -17,6 +19,7 @@ const WEB_MAX_WIDTH = 720;
 
 export function Screen({ scroll, padded = true, style, children, ...props }: ScreenProps) {
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const isWeb = Platform.OS === 'web';
   const contentWidth =
     isWeb && width > WEB_MAX_WIDTH + 32 ? WEB_MAX_WIDTH : undefined;
@@ -25,7 +28,7 @@ export function Screen({ scroll, padded = true, style, children, ...props }: Scr
     <View
       style={[
         padded && styles.padded,
-        contentWidth != null && { width: contentWidth, maxWidth: '100%', alignSelf: 'center' },
+        { width: '100%', maxWidth: contentWidth ?? '100%', alignSelf: 'center' },
         style,
       ]}
       {...props}>
@@ -33,13 +36,32 @@ export function Screen({ scroll, padded = true, style, children, ...props }: Scr
     </View>
   );
 
+  const scrollView = (
+    <ScrollView
+      style={[styles.screen, isWeb && styles.scrollWeb]}
+      contentContainerStyle={[
+        styles.scrollContent,
+        isWeb && styles.scrollContentWeb,
+        { paddingBottom: Math.max(32, insets.bottom + 24) },
+      ]}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="on-drag">
+      {content}
+    </ScrollView>
+  );
+
   if (scroll) {
+    if (isWeb) {
+      return <View style={[styles.screen, styles.screenWeb]}>{scrollView}</View>;
+    }
+
     return (
-      <ScrollView
+      <KeyboardAvoidingView
         style={styles.screen}
-        contentContainerStyle={[styles.scrollContent, isWeb && styles.scrollContentWeb]}>
-        {content}
-      </ScrollView>
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 8 : 0}>
+        {scrollView}
+      </KeyboardAvoidingView>
     );
   }
 
@@ -52,7 +74,14 @@ const styles = StyleSheet.create({
     backgroundColor: HyroxTheme.background,
   },
   screenWeb: {
-    alignItems: 'center',
+    flex: 1,
+    width: '100%',
+    maxWidth: '100%',
+    alignItems: 'stretch',
+  },
+  scrollWeb: {
+    width: '100%',
+    maxWidth: '100%',
   },
   scrollContent: {
     flexGrow: 1,
@@ -60,6 +89,7 @@ const styles = StyleSheet.create({
   scrollContentWeb: {
     alignItems: 'center',
     width: '100%',
+    maxWidth: '100%',
   },
   padded: {
     padding: 16,

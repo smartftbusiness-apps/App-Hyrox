@@ -1,10 +1,13 @@
 import { useFonts } from 'expo-font';
 import { DarkTheme, ThemeProvider, Stack } from 'expo-router';
+import * as Linking from 'expo-linking';
 import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect } from 'react';
 import 'react-native-reanimated';
 import { HyroxTheme } from '@/constants/Theme';
+import { handleAuthDeepLink } from '@/src/lib/authDeepLink';
 import { hydrateAuthStore } from '@/src/stores/authStore';
+import { navigateToEventsHome } from '@/src/utils/navigation';
 import { useCloudStatusStore } from '@/src/stores/cloudStatusStore';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { hydrateAthletesStore, syncAthletesWithEvents } from '@/src/stores/athletesStore';
@@ -61,6 +64,22 @@ export default function RootLayout() {
       .catch(() => {
         useEventsStore.getState().setHydrated(true);
       });
+  }, []);
+
+  useEffect(() => {
+    const handleUrl = (url: string) => {
+      void handleAuthDeepLink(url).then((handled) => {
+        if (!handled) return;
+        void hydrateAuthStore().then(() => navigateToEventsHome());
+      });
+    };
+
+    void Linking.getInitialURL().then((url) => {
+      if (url) handleUrl(url);
+    });
+
+    const subscription = Linking.addEventListener('url', ({ url }) => handleUrl(url));
+    return () => subscription.remove();
   }, []);
 
   if (!loaded) {

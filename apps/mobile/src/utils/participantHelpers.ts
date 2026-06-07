@@ -3,6 +3,7 @@ import { isDoublesCategory } from '@/src/utils/categoryHelpers';
 import { getCategoryNameForAthlete } from '@/src/utils/athleteHelpers';
 import { getCategoryDisplayName } from '@/src/utils/categoryLabel';
 import { getPairDisplayName, getPairMemberNames } from '@/src/utils/pairHelpers';
+import { participantKey } from '@/src/utils/timingRun';
 
 export type TimingParticipant = {
   id: string;
@@ -13,6 +14,7 @@ export type TimingParticipant = {
   categoryName: string;
   status: AthleteStatus;
   memberNames: string[];
+  racingStartedAt?: string | null;
 };
 
 export type EventParticipantRow =
@@ -41,6 +43,11 @@ export function participantsForHeat(
   participants: TimingParticipant[],
   heat: EventHeat,
 ): TimingParticipant[] {
+  const keys = heat.participantKeys ?? [];
+  if (keys.length > 0) {
+    const set = new Set(keys);
+    return participants.filter((p) => set.has(participantKey(p)) && p.status !== 'finished');
+  }
   return participants.filter((p) => {
     if (heat.categoryIds.length > 0 && !heat.categoryIds.includes(p.categoryId)) {
       return false;
@@ -48,7 +55,39 @@ export function participantsForHeat(
     if (heat.bibNumbers.length > 0 && !heat.bibNumbers.includes(p.bib)) {
       return false;
     }
+    if (heat.categoryIds.length === 0 && heat.bibNumbers.length === 0) {
+      return false;
+    }
     return p.status !== 'finished';
+  });
+}
+
+export function findHeatWithParticipant(
+  heats: EventHeat[],
+  participantKeyValue: string,
+  excludeHeatId?: string,
+): EventHeat | undefined {
+  return heats.find(
+    (h) =>
+      h.id !== excludeHeatId &&
+      (h.participantKeys ?? []).includes(participantKeyValue),
+  );
+}
+
+export function assignedParticipantsForHeat(
+  participants: TimingParticipant[],
+  heat: EventHeat,
+): TimingParticipant[] {
+  const keys = heat.participantKeys ?? [];
+  if (keys.length > 0) {
+    const set = new Set(keys);
+    return participants.filter((p) => set.has(participantKey(p)));
+  }
+  return participants.filter((p) => {
+    if (heat.categoryIds.length > 0 && !heat.categoryIds.includes(p.categoryId)) return false;
+    if (heat.bibNumbers.length > 0 && !heat.bibNumbers.includes(p.bib)) return false;
+    if (heat.categoryIds.length === 0 && heat.bibNumbers.length === 0) return false;
+    return true;
   });
 }
 
@@ -68,6 +107,7 @@ export function buildTimingParticipants(
       categoryName: getCategoryNameForAthlete(categories, a.categoryId),
       status: a.status,
       memberNames: [a.name],
+      racingStartedAt: a.racingStartedAt,
     }));
 
   const pairRows = pairs
@@ -81,6 +121,7 @@ export function buildTimingParticipants(
       categoryName: getCategoryNameForAthlete(categories, p.categoryId),
       status: p.status,
       memberNames: getPairMemberNames(p, athletes),
+      racingStartedAt: p.racingStartedAt,
     }));
 
   return [...singles, ...pairRows].sort((a, b) => {

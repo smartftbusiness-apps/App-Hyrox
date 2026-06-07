@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { EventStatus } from '@/src/domain/types';
+import productionDefaults from '../../supabase.config.json';
 
 type SupabaseExtra = {
   supabaseUrl?: string;
@@ -19,40 +20,67 @@ function readExtra(): SupabaseExtra {
   return { ...fromManifest2, ...fromManifest, ...fromExpo };
 }
 
-const extra = readExtra();
+function isValidAnonKey(key: string): boolean {
+  if (!key || key.includes('sua_anon_key') || key.includes('SEU_')) return false;
+  const parts = key.split('.');
+  return parts.length === 3 && key.startsWith('eyJ');
+}
 
-const supabaseUrl = (
-  extra.supabaseUrl ??
-  process.env.EXPO_PUBLIC_SUPABASE_URL ??
-  ''
-).trim();
-
-const supabaseAnonKey = (
-  extra.supabaseAnonKey ??
-  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
-  ''
-).trim();
-
-let client: SupabaseClient | null = null;
-
-export function isSupabaseConfigured(): boolean {
-  if (!supabaseUrl || !supabaseAnonKey) return false;
-  if (
-    supabaseUrl.includes('SEU_PROJECT_REF') ||
-    supabaseAnonKey.includes('sua_anon_key')
-  ) {
-    return false;
-  }
+function isValidSupabaseUrl(url: string): boolean {
+  if (!url || url.includes('SEU_PROJECT_REF')) return false;
   try {
-    const parsed = new URL(supabaseUrl);
-    return parsed.hostname.endsWith('supabase.co');
+    return new URL(url).hostname.endsWith('supabase.co');
   } catch {
     return false;
   }
 }
 
+function pickFirstValidUrl(...candidates: Array<string | undefined>): string {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed && isValidSupabaseUrl(trimmed)) return trimmed;
+  }
+  return productionDefaults.url;
+}
+
+function pickFirstValidKey(...candidates: Array<string | undefined>): string {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed && isValidAnonKey(trimmed)) return trimmed;
+  }
+  return productionDefaults.anonKey;
+}
+
+function resolveSupabaseConfig(): { url: string; anonKey: string } {
+  const extra = readExtra();
+  const url = pickFirstValidUrl(
+    extra.supabaseUrl,
+    process.env.EXPO_PUBLIC_SUPABASE_URL,
+    productionDefaults.url,
+  );
+  const anonKey = pickFirstValidKey(
+    extra.supabaseAnonKey,
+    process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+    productionDefaults.anonKey,
+  );
+  return { url, anonKey };
+}
+
+let client: SupabaseClient | null = null;
+let activeConfig: { url: string; anonKey: string } | null = null;
+
+export function isSupabaseConfigured(): boolean {
+  const { url, anonKey } = resolveSupabaseConfig();
+  return isValidSupabaseUrl(url) && isValidAnonKey(anonKey);
+}
+
 export function getSupabaseConfig(): { url: string; anonKey: string } {
-  return { url: supabaseUrl, anonKey: supabaseAnonKey };
+  return resolveSupabaseConfig();
+}
+
+export function resetSupabaseClient(): void {
+  client = null;
+  activeConfig = null;
 }
 
 /** Limpa sessão antiga (ex.: troca de projeto Supabase no mesmo aparelho) */
@@ -66,7 +94,7 @@ export async function clearSupabaseAuthStorage(): Promise<void> {
   } catch {
     // ignore
   }
-  client = null;
+  resetSupabaseClient();
 }
 
 export function getSupabase(): SupabaseClient {
@@ -75,8 +103,15 @@ export function getSupabase(): SupabaseClient {
       'Supabase não configurado. Defina EXPO_PUBLIC_SUPABASE_URL e EXPO_PUBLIC_SUPABASE_ANON_KEY.',
     );
   }
-  if (!client) {
-    client = createClient(supabaseUrl, supabaseAnonKey, {
+
+  const config = resolveSupabaseConfig();
+  const configChanged =
+    !activeConfig ||
+    activeConfig.url !== config.url ||
+    activeConfig.anonKey !== config.anonKey;
+
+  if (!client || configChanged) {
+    client = createClient(config.url, config.anonKey, {
       auth: {
         storage: AsyncStorage,
         autoRefreshToken: true,
@@ -84,7 +119,9 @@ export function getSupabase(): SupabaseClient {
         detectSessionInUrl: false,
       },
     });
+    activeConfig = config;
   }
+
   return client;
 }
 

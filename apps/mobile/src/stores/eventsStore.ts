@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import { useShallow } from 'zustand/react/shallow';
 import type {
   Category,
   Division,
@@ -27,8 +28,9 @@ import {
   finishEventInSupabase,
 } from '@/src/api/eventsRepository';
 import { pushEventToSupabase, scheduleEventSync } from '@/src/api/syncService';
-import { isSupabaseConfigured } from '@/src/lib/supabase';
+import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
+import { dedupeEvents } from '@/src/utils/dedupeEvents';
 
 export type CreateEventInput = {
   name: string;
@@ -56,6 +58,15 @@ export type AddHeatInput = {
   scheduledStartAt: string;
   categoryIds?: string[];
   bibNumbers?: number[];
+  participantKeys?: string[];
+};
+
+export type UpdateHeatInput = {
+  name?: string;
+  scheduledStartAt?: string;
+  categoryIds?: string[];
+  bibNumbers?: number[];
+  participantKeys?: string[];
 };
 
 export type ActionResult = { ok: true; warning?: string } | { ok: false; reason: string };
@@ -73,6 +84,7 @@ type EventsState = {
   finishEvent: (eventId: string) => Promise<ActionResult>;
   deleteEvent: (eventId: string) => Promise<ActionResult>;
   addHeat: (eventId: string, input: AddHeatInput) => ActionResult;
+  updateHeat: (eventId: string, heatId: string, input: UpdateHeatInput) => ActionResult;
   removeHeat: (eventId: string, heatId: string) => ActionResult;
   markHeatStarted: (eventId: string, heatId: string, startedAt?: string) => ActionResult;
   setHydrated: (value: boolean) => void;
@@ -109,7 +121,10 @@ function migrateEvent(event: HyroxEvent, fallbackOrganizerId: string): HyroxEven
     organizerId: event.organizerId ?? fallbackOrganizerId,
     segments: event.segments?.length ? event.segments : cloneHyroxSegments(event.id),
     categories: migrateEventCategories(event),
-    heats: event.heats ?? [],
+    heats: (event.heats ?? []).map((h) => ({
+      ...h,
+      participantKeys: h.participantKeys ?? [],
+    })),
   };
 }
 
@@ -218,12 +233,36 @@ export const useEventsStore = create<EventsState>()(
         const event = get().events.find((e) => e.id === eventId);
         const auth = assertEventCreator(event);
         if (!auth.ok) return auth;
+
+        const category = event!.categories.find((c) => c.id === categoryId);
+        const { athletes, pairs } = useAthletesStore.getState();
+        const hasAthletes = athletes.some(
+          (a) => a.eventId === eventId && a.categoryId === categoryId,
+        );
+        const hasPairs = pairs.some(
+          (p) => p.eventId === eventId && p.categoryId === categoryId,
+        );
+        if (hasAthletes || hasPairs) {
+          return {
+            ok: false,
+            reason: 'Remova ou mova os atletas/duplas desta categoria antes.',
+          };
+        }
+
         set((state) => ({
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             categories: e.categories.filter((c) => c.id !== categoryId),
           })),
         }));
+
+        if (category?.supabaseId && isSupabaseConfigured()) {
+          void getSupabase()
+            .from('categories')
+            .delete()
+            .eq('id', category.supabaseId);
+        }
+
         return { ok: true };
       },
       addSegment: (eventId, input) => {
@@ -364,12 +403,40 @@ export const useEventsStore = create<EventsState>()(
           scheduledStartAt: input.scheduledStartAt,
           categoryIds: input.categoryIds ?? [],
           bibNumbers: input.bibNumbers ?? [],
+          participantKeys: input.participantKeys ?? [],
           startedAt: null,
         };
         set((state) => ({
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             heats: [...(e.heats ?? []), heat],
+          })),
+        }));
+        return { ok: true };
+      },
+      updateHeat: (eventId, heatId, input) => {
+        const event = get().events.find((e) => e.id === eventId);
+        const auth = assertEventCreator(event);
+        if (!auth.ok) return auth;
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            heats: (e.heats ?? []).map((h) =>
+              h.id === heatId
+                ? {
+                    ...h,
+                    ...(input.name !== undefined ? { name: input.name.trim() } : {}),
+                    ...(input.scheduledStartAt !== undefined
+                      ? { scheduledStartAt: input.scheduledStartAt }
+                      : {}),
+                    ...(input.categoryIds !== undefined ? { categoryIds: input.categoryIds } : {}),
+                    ...(input.bibNumbers !== undefined ? { bibNumbers: input.bibNumbers } : {}),
+                    ...(input.participantKeys !== undefined
+                      ? { participantKeys: input.participantKeys }
+                      : {}),
+                  }
+                : h,
+            ),
           })),
         }));
         return { ok: true };
@@ -388,6 +455,8 @@ export const useEventsStore = create<EventsState>()(
       },
       markHeatStarted: (eventId, heatId, startedAt) => {
         const event = get().events.find((e) => e.id === eventId);
+        const auth = assertEventCreator(event);
+        if (!auth.ok) return auth;
         if (!event || event.status === 'finished') {
           return { ok: false, reason: 'Evento não disponível' };
         }
@@ -418,11 +487,11 @@ export async function hydrateEventsStore(): Promise<void> {
   const organizerId = useOrganizerStore.getState().ensureOrganizerId();
   await useEventsStore.persist.rehydrate();
   useEventsStore.setState((state) => ({
-    events: migrateEvents(state.events, organizerId),
+    events: dedupeEvents(migrateEvents(state.events, organizerId)),
     hydrated: true,
   }));
 }
 
 export function useEvents() {
-  return useEventsStore((s) => s.events);
+  return useEventsStore(useShallow((s) => dedupeEvents(s.events)));
 }

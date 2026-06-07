@@ -1,6 +1,7 @@
 import { router, Stack } from 'expo-router';
-import { useState } from 'react';
-import { Alert, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { fetchStaffForEvent } from '@/src/api/staffRepository';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { EventNotFound } from '@/components/EventNotFound';
@@ -8,15 +9,22 @@ import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
 import { useAthletesByEvent, usePairsByEvent } from '@/src/stores/athletesStore';
 import { getDoublesCategories } from '@/src/utils/categoryHelpers';
-import { groupEventParticipants } from '@/src/utils/participantHelpers';
+import {
+  assignedParticipantsForHeat,
+  buildTimingParticipants,
+  groupEventParticipants,
+} from '@/src/utils/participantHelpers';
 import { useEvent } from '@/src/hooks/useEvent';
 import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useRouteId } from '@/src/hooks/useRouteId';
 import { useEventsStore } from '@/src/stores/eventsStore';
+import { useEventStaffStore, type EventStaffMember } from '@/src/stores/eventStaffStore';
 import { genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
 import { confirmAsync } from '@/src/utils/confirm';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
 import { navigateToEventsHome } from '@/src/utils/navigation';
+
+const EMPTY_STAFF: EventStaffMember[] = [];
 
 export default function EventDetailScreen() {
   const id = useRouteId();
@@ -29,6 +37,18 @@ export default function EventDetailScreen() {
   const athletes = useAthletesByEvent(id);
   const pairs = usePairsByEvent(id);
   const doublesCategories = event ? getDoublesCategories(event.categories) : [];
+  const staff =
+    useEventStaffStore((s) => (id ? s.staffByEvent[id] : undefined)) ?? EMPTY_STAFF;
+
+  const loadStaff = useCallback(async () => {
+    if (!event?.supabaseId || !id) return;
+    const rows = await fetchStaffForEvent(event.supabaseId);
+    useEventStaffStore.getState().setStaffForEvent(id, rows);
+  }, [event?.supabaseId, id]);
+
+  useEffect(() => {
+    void loadStaff();
+  }, [loadStaff]);
 
   if (!event) {
     return (
@@ -50,8 +70,11 @@ export default function EventDetailScreen() {
     pairs.filter((p) => p.status === 'racing').length;
   const finished = finishReadiness.finishedCount;
   const stationCount = event.segments.filter((s) => s.type === 'station').length;
+  const heats = event.heats ?? [];
+  const timingParticipants = buildTimingParticipants(athletes, pairs, eventCategories);
   const canEdit = perms.canEditStructure;
   const canEditParticipants = canEdit;
+  const isJudgeView = perms.isJudgeMode && perms.isAssignedJudge;
   const finishBlockReason = getFinishEventBlockReason(finishReadiness);
 
   function handleAddPair() {
@@ -203,125 +226,132 @@ export default function EventDetailScreen() {
           />
         )}
 
-        <View style={styles.statsRow}>
-          <View style={styles.stat}>
-            <Text style={styles.statValue}>{athletes.length}</Text>
-            <Text style={styles.statLabel}>Inscritos</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: HyroxTheme.success }]}>{racing}</Text>
-            <Text style={styles.statLabel}>Em prova</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={styles.statValue}>{finished}</Text>
-            <Text style={styles.statLabel}>Finalizados</Text>
-          </View>
-        </View>
+        {!isJudgeView && (
+          <>
+            <View style={styles.statsRow}>
+              <View style={styles.stat}>
+                <Text style={styles.statValue}>{athletes.length}</Text>
+                <Text style={styles.statLabel}>Inscritos</Text>
+              </View>
+              <View style={styles.stat}>
+                <Text style={[styles.statValue, { color: HyroxTheme.success }]}>{racing}</Text>
+                <Text style={styles.statLabel}>Em prova</Text>
+              </View>
+              <View style={styles.stat}>
+                <Text style={styles.statValue}>{finished}</Text>
+                <Text style={styles.statLabel}>Finalizados</Text>
+              </View>
+            </View>
 
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>
-            Participantes ({totalParticipants})
-          </Text>
-        </View>
-
-        {canEditParticipants && (
-          <View style={styles.participantActions}>
-            <Button
-              label="+ Atleta"
-              onPress={() => router.push(`/event/${event.id}/athletes`)}
-              style={styles.participantActionBtn}
-            />
-            {doublesCategories.length > 0 && (
-              <Button
-                label="+ Dupla"
-                variant="secondary"
-                onPress={handleAddPair}
-                style={styles.participantActionBtn}
-              />
-            )}
-          </View>
-        )}
-
-        {!canEditParticipants && totalParticipants > 0 && (
-          <Button
-            label="Ver participantes"
-            variant="secondary"
-            onPress={() => router.push(`/event/${event.id}/athletes`)}
-            style={{ marginBottom: 12 }}
-          />
-        )}
-
-        {totalParticipants === 0 ? (
-          <Text style={styles.moreText}>
-            {event.categories.length === 0
-              ? 'Cadastre categorias antes de inscrever participantes.'
-              : 'Nenhum participante inscrito. Use + Atleta (individual) ou + Dupla.'}
-          </Text>
-        ) : (
-          participantGroups.map(({ category, participants }) => (
-            <View key={category.id} style={styles.participantGroup}>
-              <Text style={styles.participantCatTitle}>
-                {getCategoryDisplayName(category)} · {genderLabel(category.gender)}
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>
+                Participantes ({totalParticipants})
               </Text>
-              {participants.map((p) =>
-                p.kind === 'pair' ? (
-                  <Card
-                    key={p.id}
-                    title={`#${p.bib} ${p.label}`}
-                    subtitle={`Dupla · ${p.memberNames.join(' + ')}`}
-                    badge={p.status === 'racing' ? 'Em prova' : p.status === 'finished' ? 'Finalizado' : undefined}
+            </View>
+
+            {canEditParticipants && (
+              <View style={styles.participantActions}>
+                <Button
+                  label="+ Atleta"
+                  onPress={() => router.push(`/event/${event.id}/athletes`)}
+                  style={styles.participantActionBtn}
+                />
+                {doublesCategories.length > 0 && (
+                  <Button
+                    label="+ Dupla"
+                    variant="secondary"
+                    onPress={handleAddPair}
+                    style={styles.participantActionBtn}
                   />
-                ) : (
-                  <Card
-                    key={p.id}
-                    title={p.bib > 0 ? `#${p.bib} ${p.name}` : p.name}
-                    subtitle={p.bib > 0 ? 'Individual' : 'Aguardando dupla'}
-                    badge={p.status === 'racing' ? 'Em prova' : p.status === 'finished' ? 'Finalizado' : undefined}
+                )}
+              </View>
+            )}
+
+            {totalParticipants === 0 ? (
+              <Text style={styles.moreText}>
+                {event.categories.length === 0
+                  ? 'Cadastre categorias antes de inscrever participantes.'
+                  : 'Nenhum participante inscrito. Use + Atleta (individual) ou + Dupla.'}
+              </Text>
+            ) : (
+              participantGroups.map(({ category, participants }) => (
+                <View key={category.id} style={styles.participantGroup}>
+                  <Text style={styles.participantCatTitle}>
+                    {getCategoryDisplayName(category)} · {genderLabel(category.gender)}
+                  </Text>
+                  {participants.map((p) =>
+                    p.kind === 'pair' ? (
+                      <Card
+                        key={p.id}
+                        title={`#${p.bib} ${p.label}`}
+                        subtitle={`Dupla · ${p.memberNames.join(' + ')}`}
+                        badge={
+                          p.status === 'racing'
+                            ? 'Em prova'
+                            : p.status === 'finished'
+                              ? 'Finalizado'
+                              : undefined
+                        }
+                      />
+                    ) : (
+                      <Card
+                        key={p.id}
+                        title={p.bib > 0 ? `#${p.bib} ${p.name}` : p.name}
+                        subtitle={p.bib > 0 ? 'Individual' : 'Aguardando dupla'}
+                        badge={
+                          p.status === 'racing'
+                            ? 'Em prova'
+                            : p.status === 'finished'
+                              ? 'Finalizado'
+                              : undefined
+                        }
+                      />
+                    ),
+                  )}
+                </View>
+              ))
+            )}
+            {totalParticipants > 0 && canEditParticipants && (
+              <View style={styles.participantActions}>
+                <Button
+                  label="Gerenciar atletas"
+                  variant="secondary"
+                  onPress={() => router.push(`/event/${event.id}/athletes`)}
+                  style={styles.participantActionBtn}
+                />
+                {doublesCategories.length > 0 && (
+                  <Button
+                    label="Gerenciar duplas"
+                    variant="secondary"
+                    onPress={handleAddPair}
+                    style={styles.participantActionBtn}
                   />
-                ),
+                )}
+              </View>
+            )}
+
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Categorias ({event.categories.length})</Text>
+              {canEdit && (
+                <Button
+                  label="Gerenciar"
+                  variant="secondary"
+                  onPress={() => router.push(`/event/${event.id}/categories`)}
+                  style={styles.manageBtn}
+                />
               )}
             </View>
-          ))
-        )}
-        {totalParticipants > 0 && canEditParticipants && (
-          <View style={styles.participantActions}>
-            <Button
-              label="Gerenciar atletas"
-              variant="secondary"
-              onPress={() => router.push(`/event/${event.id}/athletes`)}
-              style={styles.participantActionBtn}
-            />
-            {doublesCategories.length > 0 && (
-              <Button
-                label="Gerenciar duplas"
-                variant="secondary"
-                onPress={handleAddPair}
-                style={styles.participantActionBtn}
+            {event.categories.slice(0, 3).map((cat) => (
+              <Card
+                key={cat.id}
+                title={getCategoryDisplayName(cat)}
+                subtitle={`${cat.division} · ${genderLabel(cat.gender)}`}
               />
+            ))}
+            {event.categories.length > 3 && (
+              <Text style={styles.moreText}>+{event.categories.length - 3} categorias</Text>
             )}
-          </View>
-        )}
-
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Categorias ({event.categories.length})</Text>
-          {canEdit && (
-            <Button
-              label="Gerenciar"
-              variant="secondary"
-              onPress={() => router.push(`/event/${event.id}/categories`)}
-              style={styles.manageBtn}
-            />
-          )}
-        </View>
-        {event.categories.slice(0, 3).map((cat) => (
-          <Card
-            key={cat.id}
-            title={getCategoryDisplayName(cat)}
-            subtitle={`${cat.division} · ${genderLabel(cat.gender)}`}
-          />
-        ))}
-        {event.categories.length > 3 && (
-          <Text style={styles.moreText}>+{event.categories.length - 3} categorias</Text>
+          </>
         )}
 
         <View style={styles.sectionHeader}>
@@ -353,28 +383,94 @@ export default function EventDetailScreen() {
           <Text style={styles.moreText}>Ver todos em Gerenciar →</Text>
         )}
 
-        {canEdit && (
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Baterias ({(event.heats ?? []).length})</Text>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Baterias ({heats.length})</Text>
+          {canEdit && (
             <Button
               label="Gerenciar"
               variant="secondary"
               onPress={() => router.push(`/event/${eventId}/heats`)}
               style={styles.manageBtn}
             />
-          </View>
+          )}
+        </View>
+        {heats.length === 0 ? (
+          <Text style={styles.moreText}>
+            {canEdit
+              ? 'Nenhuma bateria criada. Use Gerenciar para organizar as largadas.'
+              : 'Nenhuma bateria definida.'}
+          </Text>
+        ) : (
+          heats.map((heat) => {
+            const assigned = assignedParticipantsForHeat(timingParticipants, heat);
+            const timeLabel = new Date(heat.scheduledStartAt).toLocaleTimeString('pt-BR', {
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+            return (
+              <Pressable
+                key={heat.id}
+                style={({ pressed }) => [styles.listRow, pressed && styles.listRowPressed]}
+                onPress={() =>
+                  router.push(`/event/${eventId}/heats?heatId=${encodeURIComponent(heat.id)}`)
+                }>
+                <View style={styles.listRowBody}>
+                  <Text style={styles.listRowTitle}>
+                    {heat.name} · {timeLabel}
+                    {heat.startedAt ? ' · iniciada' : ''}
+                  </Text>
+                  {assigned.length === 0 ? (
+                    <Text style={styles.listRowMeta}>— Nenhum atleta vinculado</Text>
+                  ) : (
+                    assigned.map((p) => (
+                      <Text key={`${p.type}-${p.id}`} style={styles.listRowMeta}>
+                        · #{p.bib} {p.label}
+                      </Text>
+                    ))
+                  )}
+                </View>
+                <Text style={styles.listChevron}>›</Text>
+              </Pressable>
+            );
+          })
         )}
 
-        {canEdit && (
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Juízes</Text>
-            <Button
-              label="Designar"
-              variant="secondary"
-              onPress={() => router.push(`/event/${eventId}/judges`)}
-              style={styles.manageBtn}
-            />
-          </View>
+        {!isJudgeView && (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Juízes ({staff.length})</Text>
+              {perms.canManageJudges && (
+                <Button
+                  label="Designar"
+                  variant="secondary"
+                  onPress={() => router.push(`/event/${eventId}/judges`)}
+                  style={styles.manageBtn}
+                />
+              )}
+            </View>
+            {staff.length === 0 ? (
+              <Text style={styles.moreText}>
+                {perms.canManageJudges
+                  ? 'Nenhum juiz designado. Toque em Designar para adicionar.'
+                  : 'Nenhum juiz designado para este evento.'}
+              </Text>
+            ) : (
+              staff.map((member) => (
+                <Pressable
+                  key={member.id}
+                  style={({ pressed }) => [styles.listRow, pressed && styles.listRowPressed]}
+                  onPress={() => router.push(`/event/${eventId}/judges`)}>
+                  <View style={styles.listRowBody}>
+                    <Text style={styles.listRowTitle}>{member.fullName || 'Juiz'}</Text>
+                    <Text style={styles.listRowMeta}>
+                      · {member.email || `ID ${member.userId.slice(0, 8)}…`}
+                    </Text>
+                  </View>
+                  <Text style={styles.listChevron}>›</Text>
+                </Pressable>
+              ))
+            )}
+          </>
         )}
 
         {perms.canDeleteEvent && (
@@ -492,4 +588,38 @@ const styles = StyleSheet.create({
   runPill: { backgroundColor: 'rgba(59, 130, 246, 0.2)' },
   stationPill: { backgroundColor: 'rgba(249, 115, 22, 0.2)' },
   typePillText: { color: HyroxTheme.text, fontSize: 10, fontWeight: '700' },
+  listRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingLeft: 14,
+    borderLeftWidth: 2,
+    borderLeftColor: HyroxTheme.accent,
+    backgroundColor: HyroxTheme.surface,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: HyroxTheme.border,
+  },
+  listRowPressed: { opacity: 0.85 },
+  listRowBody: { flex: 1 },
+  listRowTitle: {
+    color: HyroxTheme.text,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  listRowMeta: {
+    color: HyroxTheme.textMuted,
+    fontSize: 13,
+    lineHeight: 20,
+    paddingLeft: 4,
+  },
+  listChevron: {
+    color: HyroxTheme.textMuted,
+    fontSize: 22,
+    fontWeight: '300',
+  },
 });

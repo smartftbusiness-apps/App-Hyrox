@@ -10,7 +10,11 @@ type SegmentProgressProps = {
 
 export function SegmentProgress({ segments, currentIndex, completedIndices }: SegmentProgressProps) {
   return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.scroll}>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.scroll}
+      contentContainerStyle={styles.scrollContent}>
       {segments.map((seg, idx) => {
         const isCurrent = idx === currentIndex;
         const isDone = completedIndices.includes(idx);
@@ -36,6 +40,10 @@ export function SegmentProgress({ segments, currentIndex, completedIndices }: Se
 const styles = StyleSheet.create({
   scroll: {
     marginBottom: 16,
+    maxWidth: '100%',
+  },
+  scrollContent: {
+    paddingRight: 8,
   },
   item: {
     width: 72,
