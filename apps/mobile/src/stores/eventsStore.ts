@@ -200,8 +200,13 @@ export const useEventsStore = create<EventsState>()(
         if (isSupabaseConfigured()) {
           void createEventInSupabase(event).then((result) => {
             if (!result.ok || !result.data) return;
+            const organizerId = useOrganizerStore.getState().organizerId;
             set((state) => ({
-              events: patchEvent(state.events, id, (e) => ({ ...e, supabaseId: result.data })),
+              events: patchEvent(state.events, id, (e) => ({
+                ...e,
+                supabaseId: result.data,
+                organizerId: organizerId ?? e.organizerId,
+              })),
             }));
             scheduleEventSync(id);
           });

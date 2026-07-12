@@ -159,8 +159,8 @@ export default function EventHeatsScreen() {
       <Screen scroll>
         <Text style={styles.heading}>Baterias de largada</Text>
         <Text style={styles.subheading}>
-          Crie baterias, vincule atletas pelo nome e número do peito. Somente o organizador
-          inicia a bateria no cronômetro.
+          Crie baterias e vincule atletas. O organizador inicia a bateria; todos seguem a ordem do
+          percurso. Juízes cronometram cada estação.
         </Text>
 
         <Input label="Nome da bateria" value={name} onChangeText={setName} placeholder="Bateria 1" />

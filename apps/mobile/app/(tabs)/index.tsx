@@ -14,11 +14,11 @@ import { HyroxTheme } from '@/constants/Theme';
 
 import { APP_ROLE_LABELS } from '@/src/domain/appRole';
 
-import { pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
+import { pullAndMergeAthleteEvents, pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
 
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 
-import { useAccessModeStore, useIsJudgeMode } from '@/src/stores/accessModeStore';
+import { useAccessModeStore, useIsAthleteMode, useIsJudgeMode } from '@/src/stores/accessModeStore';
 
 import {
 
@@ -93,6 +93,7 @@ export default function EventsScreen() {
   const user = useAuthStore((s) => s.user);
 
   const isJudge = useIsJudgeMode();
+  const isAthlete = useIsAthleteMode();
 
   const assignedEventIds = useEventStaffStore((s) => s.assignedEventIds);
 
@@ -108,17 +109,25 @@ export default function EventsScreen() {
 
 
 
+  const participatingEventIds = useMemo(() => {
+    if (!isAthlete || !user?.email) return new Set<string>();
+    const email = user.email.toLowerCase();
+    return new Set(
+      allAthletes
+        .filter((a) => a.email?.toLowerCase() === email)
+        .map((a) => a.eventId),
+    );
+  }, [isAthlete, user?.email, allAthletes]);
+
   const displayedEvents = useMemo(() => {
-
     if (isJudge) {
-
       return events.filter((e) => assignedEventIds.includes(e.id));
-
     }
-
+    if (isAthlete) {
+      return events.filter((e) => participatingEventIds.has(e.id));
+    }
     return events;
-
-  }, [events, isJudge, assignedEventIds]);
+  }, [events, isJudge, isAthlete, assignedEventIds, participatingEventIds]);
 
 
 
@@ -137,65 +146,55 @@ export default function EventsScreen() {
 
 
   useEffect(() => {
+    if (!supabaseOn || !isAthlete || !user?.email) return;
+    void pullAndMergeAthleteEvents(user.email);
+  }, [supabaseOn, isAthlete, user?.email]);
 
+  useEffect(() => {
     if (!supabaseOn || !isJudge || !user?.id) return;
-
     void pullAndMergeJudgeEvents(user.id);
-
   }, [supabaseOn, isJudge, user?.id]);
 
-
-
   async function handleRefreshOnline() {
-
     if (!user?.id) {
-
       router.push('/auth');
-
       return;
-
     }
 
-
-
     setSyncing(true);
-
     try {
+      if (isAthlete) {
+        if (!user.email) {
+          Alert.alert('Conta', 'Sua conta precisa de e-mail para buscar suas provas.');
+          return;
+        }
+        const result = await pullAndMergeAthleteEvents(user.email);
+        if (!result.ok) {
+          Alert.alert('Nuvem', result.reason);
+          return;
+        }
+        Alert.alert('Atualizado', 'Suas provas foram carregadas.');
+        return;
+      }
 
       if (isJudge) {
-
         const result = await pullAndMergeJudgeEvents(user.id);
-
         if (!result.ok) {
-
           Alert.alert('Nuvem', result.reason);
-
           return;
-
         }
-
         Alert.alert('Atualizado', 'Eventos designados foram carregados.');
-
         return;
-
       }
 
       await pullAndMergeFromSupabase(user.id);
-
       Alert.alert('Atualizado', 'Seus eventos foram sincronizados.');
-
     } catch (err) {
-
       Alert.alert('Erro ao sincronizar', translateSyncError(err));
-
     } finally {
-
       setSyncing(false);
-
       if (supabaseOn) void checkCloud();
-
     }
-
   }
 
 
@@ -206,17 +205,17 @@ export default function EventsScreen() {
 
       <Text style={styles.heading}>
 
-        {isJudge ? 'Eventos — juiz' : 'Eventos'}
+        {isJudge ? 'Eventos — juiz' : isAthlete ? 'Minhas provas' : 'Eventos'}
 
       </Text>
 
       <Text style={styles.subheading}>
 
         {isJudge
-
           ? 'Eventos em que você foi designado. Visualização + cronômetro.'
-
-          : 'Gerencie competições Hyrox no celular — com ou sem nuvem.'}
+          : isAthlete
+            ? 'Eventos em que você está inscrito. Veja seus resultados no ranking.'
+            : 'Gerencie competições Hyrox no celular — com ou sem nuvem.'}
 
       </Text>
 
@@ -259,10 +258,10 @@ export default function EventsScreen() {
           user
 
             ? isJudge
-
               ? 'Busque eventos designados na nuvem'
-
-              : user.email
+              : isAthlete
+                ? 'Busque suas provas na nuvem'
+                : user.email
 
             : 'Faça login para usar a nuvem'
 
@@ -428,7 +427,7 @@ export default function EventsScreen() {
 
 
 
-      {!isJudge && (
+      {!isJudge && !isAthlete && (
 
         <Card
 

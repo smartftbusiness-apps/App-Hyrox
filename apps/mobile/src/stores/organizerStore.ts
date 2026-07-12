@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { getSafeStorage } from '@/src/storage/safeStorage';
+import { useAuthStore } from '@/src/stores/authStore';
+import { isEventOwnedByCurrentUser } from '@/src/utils/eventOwnership';
 
 type OrganizerState = {
   organizerId: string | null;
@@ -20,8 +22,12 @@ export const useOrganizerStore = create<OrganizerState>()(
         return id;
       },
       isEventOwner: (eventOrganizerId) => {
-        const oid = get().organizerId;
-        return !!oid && oid === eventOrganizerId;
+        const authUserId = useAuthStore.getState().user?.id;
+        return isEventOwnedByCurrentUser(
+          { organizerId: eventOrganizerId },
+          authUserId,
+          get().organizerId,
+        );
       },
     }),
     {

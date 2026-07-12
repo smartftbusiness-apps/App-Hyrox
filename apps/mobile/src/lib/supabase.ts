@@ -21,9 +21,11 @@ function readExtra(): SupabaseExtra {
 }
 
 function isValidAnonKey(key: string): boolean {
-  if (!key || key.includes('sua_anon_key') || key.includes('SEU_')) return false;
-  const parts = key.split('.');
-  return parts.length === 3 && key.startsWith('eyJ');
+  const trimmed = key?.trim();
+  if (!trimmed || trimmed.includes('sua_anon_key') || trimmed.includes('SEU_')) return false;
+  if (trimmed.startsWith('sb_publishable_')) return trimmed.length > 20;
+  const parts = trimmed.split('.');
+  return parts.length === 3 && trimmed.startsWith('eyJ');
 }
 
 function isValidSupabaseUrl(url: string): boolean {
@@ -64,6 +66,68 @@ function resolveSupabaseConfig(): { url: string; anonKey: string } {
     productionDefaults.anonKey,
   );
   return { url, anonKey };
+}
+
+const SUPABASE_PROJECT_REF_KEY = 'hyrox-supabase-project-ref';
+
+export function getSupabaseProjectRef(url?: string): string | null {
+  const target = url ?? resolveSupabaseConfig().url;
+  try {
+    return new URL(target).hostname.split('.')[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+export type SupabaseDiagnostics = {
+  projectRef: string | null;
+  url: string;
+  keyKind: 'publishable' | 'jwt' | 'unknown';
+  keyPreview: string;
+};
+
+export function getSupabaseDiagnostics(): SupabaseDiagnostics {
+  const { url, anonKey } = resolveSupabaseConfig();
+  const keyKind = anonKey.startsWith('sb_publishable_')
+    ? 'publishable'
+    : anonKey.startsWith('eyJ')
+      ? 'jwt'
+      : 'unknown';
+  const keyPreview =
+    anonKey.length <= 12 ? anonKey : `${anonKey.slice(0, 16)}…${anonKey.slice(-6)}`;
+  return {
+    projectRef: getSupabaseProjectRef(url),
+    url,
+    keyKind,
+    keyPreview,
+  };
+}
+
+/** Remove sessões de outro projeto Supabase (ex.: APK antigo no mesmo aparelho). */
+export async function ensureSupabaseProjectStorage(): Promise<boolean> {
+  const ref = getSupabaseProjectRef();
+  if (!ref) return false;
+
+  let cleared = false;
+  try {
+    const storedRef = await AsyncStorage.getItem(SUPABASE_PROJECT_REF_KEY);
+    const keys = await AsyncStorage.getAllKeys();
+    const foreignAuthKeys = keys.filter((key) => {
+      const match = /^sb-([a-z0-9]+)-auth-token/.exec(key);
+      return match != null && match[1] !== ref;
+    });
+
+    if ((storedRef && storedRef !== ref) || foreignAuthKeys.length > 0) {
+      await clearSupabaseAuthStorage();
+      cleared = true;
+    }
+
+    await AsyncStorage.setItem(SUPABASE_PROJECT_REF_KEY, ref);
+  } catch {
+    // ignore
+  }
+
+  return cleared;
 }
 
 let client: SupabaseClient | null = null;
@@ -123,6 +187,30 @@ export function getSupabase(): SupabaseClient {
   }
 
   return client;
+}
+
+const noopStorage = {
+  getItem: async () => null,
+  setItem: async () => {},
+  removeItem: async () => {},
+};
+
+/** Cliente sem sessão persistente — usado pelo organizador para criar conta de juiz sem deslogar. */
+export function createEphemeralSupabase(): SupabaseClient {
+  if (!isSupabaseConfigured()) {
+    throw new Error(
+      'Supabase não configurado. Defina EXPO_PUBLIC_SUPABASE_URL e EXPO_PUBLIC_SUPABASE_ANON_KEY.',
+    );
+  }
+  const config = resolveSupabaseConfig();
+  return createClient(config.url, config.anonKey, {
+    auth: {
+      storage: noopStorage,
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
 }
 
 export type DbEventRow = {

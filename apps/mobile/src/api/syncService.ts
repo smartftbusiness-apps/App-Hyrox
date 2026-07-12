@@ -21,6 +21,7 @@ import { useAthletesStore } from '@/src/stores/athletesStore';
 import { useEventStaffStore } from '@/src/stores/eventStaffStore';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { fetchAndApplyLiveRuns } from '@/src/api/liveTimingRepository';
+import { fetchMyJudgeAssignments } from '@/src/api/staffRepository';
 import { dedupeEvents } from '@/src/utils/dedupeEvents';
 
 type DbEvent = {
@@ -105,9 +106,13 @@ function mergeEventsLocalRemote(remote: HyroxEvent, existing: HyroxEvent): Hyrox
   return {
     ...remote,
     id: existing.id,
-    segments: existing.segments,
-    heats: existing.heats ?? remote.heats,
+    segments: existing.segments.length > 0 ? existing.segments : remote.segments,
+    heats: existing.heats?.length ? existing.heats : remote.heats,
     categories: mergedCategories,
+    status: remote.status,
+    name: remote.name,
+    date: remote.date,
+    location: remote.location,
   };
 }
 
@@ -530,6 +535,162 @@ export async function pullJudgeAssignedData(userId: string): Promise<{
 
 export type JudgeSyncResult = { ok: true } | { ok: false; reason: string };
 
+export type AthleteSyncResult = { ok: true } | { ok: false; reason: string };
+
+export async function pullAthleteParticipations(userEmail: string): Promise<{
+  events: HyroxEvent[];
+  athletes: Athlete[];
+  pairs: DoublesPair[];
+  participatingLocalIds: string[];
+}> {
+  if (!isSupabaseConfigured()) {
+    return { events: [], athletes: [], pairs: [], participatingLocalIds: [] };
+  }
+
+  const email = userEmail.trim().toLowerCase();
+  if (!email) {
+    return { events: [], athletes: [], pairs: [], participatingLocalIds: [] };
+  }
+
+  const { data: athleteRows, error: athletesError } = await getSupabase()
+    .from('athletes')
+    .select('event_id')
+    .ilike('email', email);
+
+  if (athletesError) throw new Error(athletesError.message);
+
+  const eventDbIds = [
+    ...new Set((athleteRows ?? []).map((row) => row.event_id as string).filter(Boolean)),
+  ];
+
+  if (!eventDbIds.length) {
+    return { events: [], athletes: [], pairs: [], participatingLocalIds: [] };
+  }
+
+  const { data: eventRows, error: eventsError } = await getSupabase()
+    .from('events')
+    .select('id, organizer_id, name, event_date, location, status')
+    .in('id', eventDbIds)
+    .in('status', ['open', 'live', 'finished'])
+    .order('event_date', { ascending: false });
+
+  if (eventsError) throw new Error(eventsError.message);
+
+  const bundle = await loadBundleFromDbEvents((eventRows ?? []) as DbEvent[]);
+  return {
+    ...bundle,
+    participatingLocalIds: bundle.events.map((e) => e.id),
+  };
+}
+
+export async function pullAndMergeAthleteEvents(userEmail: string): Promise<AthleteSyncResult> {
+  try {
+    const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs, participatingLocalIds } =
+      await pullAthleteParticipations(userEmail);
+
+    const remoteIds = new Set(dbEvents.map((e) => e.id));
+    const eventState = useEventsStore.getState();
+    const merged = dbEvents.map((remote) => {
+      const existing = eventState.events.find(
+        (e) => e.supabaseId === remote.supabaseId || e.id === remote.id,
+      );
+      return existing ? mergeEventsLocalRemote(remote, existing) : remote;
+    });
+    const mergedLocalIds = new Set(merged.map((e) => e.id));
+    const mergedSupabaseIds = new Set(
+      merged.map((e) => e.supabaseId).filter((id): id is string => !!id),
+    );
+    const kept = eventState.events.filter((e) => {
+      if (mergedLocalIds.has(e.id)) return false;
+      if (e.supabaseId && mergedSupabaseIds.has(e.supabaseId)) return false;
+      if (remoteIds.has(e.id)) return false;
+      return participatingLocalIds.includes(e.id);
+    });
+
+    useEventsStore.setState({
+      events: dedupeEvents([...merged, ...kept]),
+    });
+
+    const athleteState = useAthletesStore.getState();
+    const { athletes, pairs } = applyMergedParticipants(
+      athleteState.athletes,
+      athleteState.pairs,
+      dbAthletes,
+      dbPairs,
+      merged,
+    );
+    useAthletesStore.setState({ athletes, pairs });
+
+    return { ok: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Erro ao buscar suas provas';
+    return { ok: false, reason: message };
+  }
+}
+
+async function syncJudgeStationAssignments(events: HyroxEvent[]): Promise<void> {
+  const rows = await fetchMyJudgeAssignments();
+  const bySupabaseId = new Map(events.map((e) => [e.supabaseId!, e.id]));
+  const assignments: Record<string, number | null> = {};
+
+  for (const event of events) {
+    if (!event.supabaseId) continue;
+    const row = rows.find((r) => r.event_id === event.supabaseId);
+    assignments[event.id] = row?.station_order ?? null;
+  }
+
+  if (Object.keys(assignments).length) {
+    useEventStaffStore.getState().setJudgeStations(assignments);
+  }
+}
+
+/** Sincroniza evento ao vivo para o juiz: status, atletas, estação designada e cronômetros. */
+export async function syncJudgeEventLive(localEventId: string): Promise<void> {
+  const event = useEventsStore.getState().events.find((e) => e.id === localEventId);
+  if (!event?.supabaseId || !isSupabaseConfigured()) return;
+
+  const { data, error } = await getSupabase()
+    .from('events')
+    .select('id, organizer_id, name, event_date, location, status')
+    .eq('id', event.supabaseId)
+    .maybeSingle();
+
+  if (error || !data) return;
+
+  useEventsStore.setState((state) => ({
+    events: state.events.map((e) =>
+      e.id === localEventId
+        ? {
+            ...e,
+            name: data.name,
+            date: data.event_date,
+            location: data.location,
+            status: data.status as HyroxEvent['status'],
+          }
+        : e,
+    ),
+  }));
+
+  const bundle = await loadBundleFromDbEvents([data as DbEvent]);
+  const athleteState = useAthletesStore.getState();
+  const freshEvent = useEventsStore.getState().events.find((e) => e.id === localEventId) ?? event;
+  const { athletes, pairs } = applyMergedParticipants(
+    athleteState.athletes,
+    athleteState.pairs,
+    bundle.athletes,
+    bundle.pairs,
+    [freshEvent],
+  );
+  useAthletesStore.setState({ athletes, pairs });
+  await fetchAndApplyLiveRuns(localEventId);
+
+  const rows = await fetchMyJudgeAssignments();
+  const row = rows.find((r) => r.event_id === event.supabaseId);
+  useEventStaffStore
+    .getState()
+    .setJudgeStationForEvent(localEventId, row?.station_order ?? null);
+}
+
 export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSyncResult> {
   try {
     const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs } =
@@ -568,6 +729,7 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
       merged,
     );
     useAthletesStore.setState({ athletes, pairs });
+    await syncJudgeStationAssignments(merged);
 
     return { ok: true };
   } catch (err) {
@@ -645,28 +807,7 @@ export async function pullAndMergePublicEvents(): Promise<PublicSyncResult> {
 
 /** Atualiza atletas/duplas de um evento (status racing + início na nuvem). */
 export async function pullEventParticipantsLive(localEventId: string): Promise<void> {
-  const event = useEventsStore.getState().events.find((e) => e.id === localEventId);
-  if (!event?.supabaseId || !isSupabaseConfigured()) return;
-
-  const { data, error } = await getSupabase()
-    .from('events')
-    .select('id, organizer_id, name, event_date, location, status')
-    .eq('id', event.supabaseId)
-    .maybeSingle();
-
-  if (error || !data) return;
-
-  const bundle = await loadBundleFromDbEvents([data as DbEvent]);
-  const athleteState = useAthletesStore.getState();
-  const { athletes, pairs } = applyMergedParticipants(
-    athleteState.athletes,
-    athleteState.pairs,
-    bundle.athletes,
-    bundle.pairs,
-    [event],
-  );
-  useAthletesStore.setState({ athletes, pairs });
-  await fetchAndApplyLiveRuns(localEventId);
+  await syncJudgeEventLive(localEventId);
 }
 
 export async function pullAndMergeFromSupabase(organizerId: string): Promise<void> {
@@ -976,14 +1117,42 @@ export async function pushEventToSupabase(eventId: string): Promise<RepositoryRe
   const event = useEventsStore.getState().events.find((e) => e.id === eventId);
   if (!event) return { ok: false, reason: 'Evento não encontrado' };
 
+  const {
+    data: { user },
+  } = await getSupabase().auth.getUser();
+  if (!user) {
+    return { ok: false, reason: 'Faça login para sincronizar o evento com a nuvem.' };
+  }
+
   const ensured = await ensureEventInSupabase(event);
   if (!ensured.ok) return ensured;
   const dbEventId = ensured.data!;
 
-  if (event.supabaseId !== dbEventId) {
+  const { data: cloudEvent, error: cloudEventError } = await getSupabase()
+    .from('events')
+    .select('organizer_id')
+    .eq('id', dbEventId)
+    .maybeSingle();
+
+  if (cloudEventError) return { ok: false, reason: cloudEventError.message };
+
+  const localOwnsEvent =
+    event.organizerId === user.id ||
+    event.organizerId.startsWith('org-') ||
+    event.organizerId === 'legacy';
+
+  if (cloudEvent && cloudEvent.organizer_id !== user.id && localOwnsEvent) {
+    const { error: ownerError } = await getSupabase()
+      .from('events')
+      .update({ organizer_id: user.id })
+      .eq('id', dbEventId);
+    if (ownerError) return { ok: false, reason: ownerError.message };
+  }
+
+  if (event.supabaseId !== dbEventId || event.organizerId !== user.id) {
     useEventsStore.setState((state) => ({
       events: state.events.map((e) =>
-        e.id === eventId ? { ...e, supabaseId: dbEventId } : e,
+        e.id === eventId ? { ...e, supabaseId: dbEventId, organizerId: user.id } : e,
       ),
     }));
   }
