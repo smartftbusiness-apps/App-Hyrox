@@ -14,13 +14,13 @@ import {
   resetSupabaseClient,
 } from '@/src/lib/supabase';
 
-import { pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
+import { pullAndMergeFromSupabase, pullAndMergeAthleteEvents, pullAndMergeJudgeEvents } from '@/src/api/syncService';
 
 import { useAccessModeStore } from '@/src/stores/accessModeStore';
 
 import { useEventStaffStore } from '@/src/stores/eventStaffStore';
 
-import { useOrganizerStore } from '@/src/stores/organizerStore';
+import { reconcileOrganizerWithAuth } from '@/src/utils/organizerReconcile';
 
 import { translateAuthError, translateSyncError } from '@/src/utils/authErrors';
 
@@ -68,16 +68,41 @@ type AuthState = {
 
 
 
-function bindOrganizerToAuth(user: User | null): void {
-
-  if (user?.id) {
-
-    useOrganizerStore.setState({ organizerId: user.id });
-
+async function bootstrapOrganizerProfileOnLogin(): Promise<void> {
+  const { error } = await getSupabase().rpc('bootstrap_organizer_profile');
+  if (error) {
+    const msg = error.message.toLowerCase();
+    if (msg.includes('function') && msg.includes('does not exist')) return;
+    throw new Error(error.message);
   }
-
 }
 
+async function assertJudgeProfile(userId: string): Promise<AuthActionResult | null> {
+  const { data, error } = await getSupabase()
+    .from('profiles')
+    .select('role')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (error) return { ok: false, reason: error.message };
+  if (data?.role !== 'staff') {
+    return {
+      ok: false,
+      reason:
+        'Esta conta não é de juiz. Peça ao organizador para cadastrá-lo de novo ou use o e-mail e a senha que ele definiu, com o perfil Juiz selecionado.',
+    };
+  }
+  return null;
+}
+
+async function reconcileAuthUser(user: User | null): Promise<void> {
+  if (!user?.id) return;
+  await applyProfileRole(user.id);
+  if (useAccessModeStore.getState().isOrganizer()) {
+    await bootstrapOrganizerProfileOnLogin().catch(() => undefined);
+    reconcileOrganizerWithAuth(user.id);
+  }
+}
 
 
 async function applyProfileRole(userId: string): Promise<void> {
@@ -122,7 +147,12 @@ async function recoverFromInvalidApiKey(): Promise<void> {
   resetSupabaseClient();
 }
 
-async function syncAfterAuth(userId: string): Promise<string | undefined> {
+async function syncAfterAuth(userId: string, userEmail?: string | null): Promise<string | undefined> {
+  if (useAccessModeStore.getState().isAthlete()) {
+    if (!userEmail) return 'Conta sem e-mail — não foi possível carregar suas provas.';
+    const result = await pullAndMergeAthleteEvents(userEmail);
+    return result.ok ? undefined : result.reason;
+  }
 
   if (useAccessModeStore.getState().isJudge()) {
 
@@ -189,36 +219,22 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     const session = data.session ?? null;
 
-    bindOrganizerToAuth(session?.user ?? null);
-
     set({ session, user: session?.user ?? null, hydrated: true });
 
-
-
     supabase.auth.onAuthStateChange((_event, nextSession) => {
-
-      bindOrganizerToAuth(nextSession?.user ?? null);
-
       set({ session: nextSession, user: nextSession?.user ?? null });
-
+      if (nextSession?.user) {
+        void reconcileAuthUser(nextSession.user);
+      }
     });
 
-
-
     if (!session?.user) {
-
       useEventStaffStore.getState().clear();
-
       return;
-
     }
 
-
-
-    await applyProfileRole(session.user.id).catch(() => undefined);
-
-    await syncAfterAuth(session.user.id).catch(() => undefined);
-
+    await reconcileAuthUser(session.user);
+    await syncAfterAuth(session.user.id, session.user.email).catch(() => undefined);
   },
 
 
@@ -244,44 +260,40 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     try {
 
       let { data, error } = await getSupabase().auth.signInWithPassword({
-        email: email.trim(),
+        email: email.trim().toLowerCase(),
         password,
       });
 
       if (error && isInvalidApiKeyError(error.message)) {
         await recoverFromInvalidApiKey();
         ({ data, error } = await getSupabase().auth.signInWithPassword({
-          email: email.trim(),
+          email: email.trim().toLowerCase(),
           password,
         }));
       }
 
       if (error) return { ok: false, reason: translateAuthError(error.message) };
 
-
-
-      bindOrganizerToAuth(data.user);
+      if (data.user && useAccessModeStore.getState().isJudge()) {
+        const judgeCheck = await assertJudgeProfile(data.user.id);
+        if (judgeCheck) {
+          await getSupabase().auth.signOut();
+          set({ session: null, user: null });
+          return judgeCheck;
+        }
+      }
 
       set({ session: data.session, user: data.user });
-
-
 
       let warning: string | undefined;
 
       if (data.user) {
-
         try {
-
-          await applyProfileRole(data.user.id);
-
-          warning = await syncAfterAuth(data.user.id);
-
+          await reconcileAuthUser(data.user);
+          warning = await syncAfterAuth(data.user.id, data.user.email);
         } catch (syncError) {
-
           warning = translateSyncError(syncError);
-
         }
-
       }
 
       return warning ? { ok: true, warning } : { ok: true };
@@ -329,8 +341,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         emailRedirectTo: getAuthRedirectUrl(),
       };
 
+      const normalizedEmail = email.trim().toLowerCase();
+
       let { data, error } = await getSupabase().auth.signUp({
-        email: email.trim(),
+        email: normalizedEmail,
         password,
         options: signUpOptions,
       });
@@ -338,7 +352,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       if (error && isInvalidApiKeyError(error.message)) {
         await recoverFromInvalidApiKey();
         ({ data, error } = await getSupabase().auth.signUp({
-          email: email.trim(),
+          email: normalizedEmail,
           password,
           options: signUpOptions,
         }));
@@ -362,15 +376,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
 
 
-      bindOrganizerToAuth(data.user);
-
       set({ session: data.session, user: data.user });
 
       let warning: string | undefined;
       if (data.user && data.session) {
         try {
-          await applyProfileRole(data.user.id);
-          warning = await syncAfterAuth(data.user.id);
+          await reconcileAuthUser(data.user);
+          warning = await syncAfterAuth(data.user.id, data.user.email);
         } catch (syncError) {
           warning = translateSyncError(syncError);
         }

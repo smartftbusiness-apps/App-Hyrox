@@ -307,15 +307,228 @@ $$;
 
 grant execute on function public.lookup_profile_id_by_email(text) to authenticated;
 
+-- Helpers RLS (criar antes das RPCs que os referenciam)
+create or replace function public.is_event_organizer(p_event_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from events
+    where id = p_event_id and organizer_id = auth.uid()
+  );
+$$;
+
+create or replace function public.can_manage_event(p_event_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.is_event_organizer(p_event_id)
+    or exists (
+      select 1 from event_staff
+      where event_id = p_event_id and user_id = auth.uid()
+    );
+$$;
+
+-- Conta organizadora (perfil ou dono de evento)
+create or replace function public.is_organizer_account()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = auth.uid() and role = 'organizer'::user_role
+  )
+  or exists (
+    select 1 from public.events
+    where organizer_id = auth.uid()
+  );
+$$;
+
+grant execute on function public.is_organizer_account() to authenticated;
+
+create or replace function public.bootstrap_organizer_profile()
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_name text;
+  v_meta text;
+begin
+  if auth.uid() is null then
+    raise exception 'Faça login como organizador';
+  end if;
+
+  select
+    coalesce(nullif(trim(raw_user_meta_data->>'full_name'), ''), ''),
+    coalesce(raw_user_meta_data->>'role', 'organizer')
+  into v_name, v_meta
+  from auth.users
+  where id = auth.uid();
+
+  insert into public.profiles (id, full_name, role)
+  values (
+    auth.uid(),
+    v_name,
+    case when v_meta in ('staff', 'judge', 'viewer') then 'viewer'::user_role else 'organizer'::user_role end
+  )
+  on conflict (id) do nothing;
+
+  update public.profiles
+  set role = 'organizer'::user_role
+  where id = auth.uid()
+    and exists (select 1 from public.events e where e.organizer_id = auth.uid());
+end;
+$$;
+
+grant execute on function public.bootstrap_organizer_profile() to authenticated;
+
+-- Organizador finaliza conta do juiz (perfil staff + e-mail confirmado para login imediato)
+create or replace function public.ensure_judge_profile_for_organizer(
+  p_user_id uuid,
+  p_full_name text default ''
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Faça login como organizador';
+  end if;
+
+  perform public.bootstrap_organizer_profile();
+
+  if not public.is_organizer_account() then
+    raise exception 'Apenas organizadores podem cadastrar juízes';
+  end if;
+
+  insert into public.profiles (id, full_name, role)
+  values (
+    p_user_id,
+    coalesce(nullif(trim(p_full_name), ''), 'Juiz'),
+    'staff'::user_role
+  )
+  on conflict (id) do update set
+    full_name = case
+      when excluded.full_name <> '' and excluded.full_name <> 'Juiz' then excluded.full_name
+      else profiles.full_name
+    end,
+    role = 'staff'::user_role;
+end;
+$$;
+
+create or replace function public.confirm_judge_email_for_organizer(p_user_id uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Faça login como organizador';
+  end if;
+
+  perform public.bootstrap_organizer_profile();
+
+  if not public.is_organizer_account() then
+    raise exception 'Apenas organizadores podem confirmar juízes';
+  end if;
+
+  if not exists (
+    select 1 from public.profiles where id = p_user_id and role = 'staff'
+  ) then
+    raise exception 'Conta não é de juiz (staff)';
+  end if;
+
+  update auth.users
+  set
+    email_confirmed_at = coalesce(email_confirmed_at, now()),
+    updated_at = now()
+  where id = p_user_id;
+
+  return found;
+end;
+$$;
+
+grant execute on function public.ensure_judge_profile_for_organizer(uuid, text) to authenticated;
+grant execute on function public.confirm_judge_email_for_organizer(uuid) to authenticated;
+
+-- Organizador define/atualiza a senha do juiz
+create extension if not exists pgcrypto with schema extensions;
+
+create or replace function public.set_judge_password_for_organizer(
+  p_user_id uuid,
+  p_password text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, auth, extensions
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'Faça login como organizador';
+  end if;
+
+  perform public.bootstrap_organizer_profile();
+
+  if not public.is_organizer_account() then
+    raise exception 'Apenas organizadores podem definir senha de juízes';
+  end if;
+
+  if not exists (
+    select 1 from public.profiles where id = p_user_id and role = 'staff'
+  ) then
+    raise exception 'Conta não é de juiz (staff)';
+  end if;
+
+  if p_password is null or length(trim(p_password)) < 6 then
+    raise exception 'A senha precisa ter pelo menos 6 caracteres';
+  end if;
+
+  update auth.users
+  set
+    encrypted_password = extensions.crypt(trim(p_password), extensions.gen_salt('bf')),
+    email_confirmed_at = coalesce(email_confirmed_at, now()),
+    updated_at = now()
+  where id = p_user_id;
+
+  if not found then
+    raise exception 'Usuário não encontrado';
+  end if;
+end;
+$$;
+
+grant execute on function public.set_judge_password_for_organizer(uuid, text) to authenticated;
+
 -- Lista juízes do evento com e-mail (organizador)
+alter table event_staff
+  add column if not exists station_order int check (station_order is null or station_order > 0);
+
+drop function if exists public.list_event_staff(uuid);
+
 create or replace function public.list_event_staff(p_event_id uuid)
 returns table (
   id uuid,
   user_id uuid,
   email text,
-  full_name text
+  full_name text,
+  station_order int
 )
 language sql
+stable
 security definer
 set search_path = public
 as $$
@@ -323,7 +536,8 @@ as $$
     es.id,
     es.user_id,
     u.email::text,
-    p.full_name
+    p.full_name,
+    es.station_order
   from event_staff es
   join profiles p on p.id = es.user_id
   join auth.users u on u.id = es.user_id
@@ -332,6 +546,23 @@ as $$
 $$;
 
 grant execute on function public.list_event_staff(uuid) to authenticated;
+
+create or replace function public.list_my_judge_assignments()
+returns table (
+  event_id uuid,
+  station_order int
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select es.event_id, es.station_order
+  from event_staff es
+  where es.user_id = auth.uid();
+$$;
+
+grant execute on function public.list_my_judge_assignments() to authenticated;
 
 -- Eventos designados ao juiz logado
 create or replace function public.list_my_assigned_event_ids()
@@ -346,25 +577,126 @@ $$;
 
 grant execute on function public.list_my_assigned_event_ids() to authenticated;
 
--- Provas em andamento (cronômetro compartilhado organizador ↔ juiz)
+-- Juízes já cadastrados pelo organizador (todos os eventos)
+drop function if exists public.list_organizer_judges();
+
+create or replace function public.list_organizer_judges()
+returns table (
+  user_id uuid,
+  email text,
+  full_name text,
+  events_count bigint
+)
+language sql
+stable
+security definer
+set search_path = public, auth
+as $$
+  select
+    p.id as user_id,
+    u.email::text,
+    p.full_name,
+    count(distinct es.event_id) as events_count
+  from public.profiles p
+  join auth.users u on u.id = p.id
+  join public.event_staff es on es.user_id = p.id
+  join public.events e on e.id = es.event_id
+  where e.organizer_id = auth.uid()
+    and p.role = 'staff'::user_role
+  group by p.id, u.email, p.full_name
+  order by coalesce(nullif(trim(p.full_name), ''), u.email::text);
+$$;
+
+grant execute on function public.list_organizer_judges() to authenticated;
+
+-- Estado completo do cronômetro ao vivo (organizador ↔ juízes)
+alter table athlete_runs
+  add column if not exists current_segment_order int,
+  add column if not exists current_segment_started_at timestamptz,
+  add column if not exists penalties_ms bigint not null default 0,
+  add column if not exists live_complete_at timestamptz;
+
+alter table pair_runs
+  add column if not exists current_segment_order int,
+  add column if not exists current_segment_started_at timestamptz,
+  add column if not exists penalties_ms bigint not null default 0,
+  add column if not exists live_complete_at timestamptz;
+
+drop function if exists public.list_event_live_runs(uuid);
+
 create or replace function public.list_event_live_runs(p_event_id uuid)
 returns table (
   participant_kind text,
   participant_id uuid,
-  started_at timestamptz
+  run_id uuid,
+  started_at timestamptz,
+  current_segment_order int,
+  current_segment_started_at timestamptz,
+  penalties_ms bigint,
+  live_complete_at timestamptz,
+  completed_segments jsonb,
+  updated_at timestamptz
 )
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select 'athlete'::text, ar.athlete_id, ar.started_at
+  select
+    'athlete'::text,
+    ar.athlete_id,
+    ar.id,
+    ar.started_at,
+    ar.current_segment_order,
+    ar.current_segment_started_at,
+    ar.penalties_ms,
+    ar.live_complete_at,
+    coalesce(
+      (
+        select jsonb_agg(
+          jsonb_build_object(
+            'segment_order', s.order_index,
+            'duration_ms', st.duration_ms
+          )
+          order by s.order_index
+        )
+        from segment_times st
+        join segments s on s.id = st.segment_id
+        where st.athlete_run_id = ar.id
+      ),
+      '[]'::jsonb
+    ),
+    ar.updated_at
   from athlete_runs ar
   where ar.event_id = p_event_id
     and ar.status = 'in_progress'
     and public.can_manage_event(p_event_id)
   union all
-  select 'pair'::text, pr.pair_id, pr.started_at
+  select
+    'pair'::text,
+    pr.pair_id,
+    pr.id,
+    pr.started_at,
+    pr.current_segment_order,
+    pr.current_segment_started_at,
+    pr.penalties_ms,
+    pr.live_complete_at,
+    coalesce(
+      (
+        select jsonb_agg(
+          jsonb_build_object(
+            'segment_order', s.order_index,
+            'duration_ms', pst.duration_ms
+          )
+          order by s.order_index
+        )
+        from pair_segment_times pst
+        join segments s on s.id = pst.segment_id
+        where pst.pair_run_id = pr.id
+      ),
+      '[]'::jsonb
+    ),
+    pr.updated_at
   from pair_runs pr
   where pr.event_id = p_event_id
     and pr.status = 'in_progress'
@@ -451,35 +783,6 @@ create policy "templates_select_all" on course_templates
 drop policy if exists "segments_select_all" on segments;
 create policy "segments_select_all" on segments
   for select to authenticated, anon using (true);
-
--- Helper: é organizador do evento?
-create or replace function public.is_event_organizer(p_event_id uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1 from events
-    where id = p_event_id and organizer_id = auth.uid()
-  );
-$$;
-
--- Helper: é staff ou organizador do evento
-create or replace function public.can_manage_event(p_event_id uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select public.is_event_organizer(p_event_id)
-    or exists (
-      select 1 from event_staff
-      where event_id = p_event_id and user_id = auth.uid()
-    );
-$$;
 
 -- Events
 drop policy if exists "events_select_public_live" on events;

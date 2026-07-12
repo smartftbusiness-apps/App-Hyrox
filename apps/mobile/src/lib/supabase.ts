@@ -21,9 +21,11 @@ function readExtra(): SupabaseExtra {
 }
 
 function isValidAnonKey(key: string): boolean {
-  if (!key || key.includes('sua_anon_key') || key.includes('SEU_')) return false;
-  const parts = key.split('.');
-  return parts.length === 3 && key.startsWith('eyJ');
+  const trimmed = key?.trim();
+  if (!trimmed || trimmed.includes('sua_anon_key') || trimmed.includes('SEU_')) return false;
+  if (trimmed.startsWith('sb_publishable_')) return trimmed.length > 20;
+  const parts = trimmed.split('.');
+  return parts.length === 3 && trimmed.startsWith('eyJ');
 }
 
 function isValidSupabaseUrl(url: string): boolean {
@@ -123,6 +125,30 @@ export function getSupabase(): SupabaseClient {
   }
 
   return client;
+}
+
+const noopStorage = {
+  getItem: async () => null,
+  setItem: async () => {},
+  removeItem: async () => {},
+};
+
+/** Cliente sem sessão persistente — usado pelo organizador para criar conta de juiz sem deslogar. */
+export function createEphemeralSupabase(): SupabaseClient {
+  if (!isSupabaseConfigured()) {
+    throw new Error(
+      'Supabase não configurado. Defina EXPO_PUBLIC_SUPABASE_URL e EXPO_PUBLIC_SUPABASE_ANON_KEY.',
+    );
+  }
+  const config = resolveSupabaseConfig();
+  return createClient(config.url, config.anonKey, {
+    auth: {
+      storage: noopStorage,
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
 }
 
 export type DbEventRow = {

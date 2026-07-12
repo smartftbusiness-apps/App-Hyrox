@@ -1,7 +1,10 @@
 import { router, Stack } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { fetchRunsAtJudgeStation } from '@/src/api/liveTimingRepository';
+import { syncJudgeEventLive } from '@/src/api/syncService';
 import { fetchStaffForEvent } from '@/src/api/staffRepository';
+import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { EventNotFound } from '@/components/EventNotFound';
@@ -23,6 +26,9 @@ import { genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
 import { confirmAsync } from '@/src/utils/confirm';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
 import { navigateToEventsHome } from '@/src/utils/navigation';
+import { formatMs } from '@/src/utils/formatTime';
+import { stationLabel, isParticipantApproachingStation, isParticipantAtStation } from '@/src/utils/stationTiming';
+import { getTotalMs, isSegmentRunning, participantKey, type TimingRunState } from '@/src/utils/timingRun';
 
 const EMPTY_STAFF: EventStaffMember[] = [];
 
@@ -49,6 +55,36 @@ export default function EventDetailScreen() {
   useEffect(() => {
     void loadStaff();
   }, [loadStaff]);
+
+  const isJudgeViewEarly = !!event && perms.isJudgeMode && perms.isAssignedJudge;
+  const judgeStationOrder = useEventStaffStore((s) =>
+    id ? s.judgeStationByEvent[id] : undefined,
+  );
+  const [stationRuns, setStationRuns] = useState<TimingRunState[]>([]);
+  const [stationNow, setStationNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!isJudgeViewEarly || !id || judgeStationOrder == null || !isSupabaseConfigured()) {
+      setStationRuns([]);
+      return;
+    }
+
+    const syncStation = async () => {
+      await syncJudgeEventLive(id);
+      const runs = await fetchRunsAtJudgeStation(id, judgeStationOrder);
+      setStationRuns(runs);
+    };
+
+    void syncStation();
+    const interval = setInterval(() => void syncStation(), 2000);
+    return () => clearInterval(interval);
+  }, [isJudgeViewEarly, id, judgeStationOrder]);
+
+  useEffect(() => {
+    if (!isJudgeViewEarly) return;
+    const tick = setInterval(() => setStationNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, [isJudgeViewEarly]);
 
   if (!event) {
     return (
@@ -224,6 +260,55 @@ export default function EventDetailScreen() {
             onPress={() => router.push('/(tabs)/timing')}
             style={{ marginBottom: 16 }}
           />
+        )}
+
+        {isJudgeView && !isFinished && (
+          <>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>
+                Na sua estação — {judgeStationOrder != null ? stationLabel(event.segments, judgeStationOrder) : '…'} ({stationRuns.length})
+              </Text>
+            </View>
+            {judgeStationOrder == null ? (
+              <Text style={styles.moreText}>
+                Estação não definida. Peça ao organizador para designar sua estação em Juízes.
+              </Text>
+            ) : stationRuns.length === 0 ? (
+              <Text style={styles.moreText}>
+                Nenhum atleta a caminho ou nesta estação. Aguarde o organizador iniciar a bateria.
+              </Text>
+            ) : (
+              stationRuns.map((run) => {
+                const approaching =
+                  judgeStationOrder != null &&
+                  isParticipantApproachingStation(run, event.segments, judgeStationOrder);
+                const atStation =
+                  judgeStationOrder != null &&
+                  isParticipantAtStation(run, event.segments, judgeStationOrder);
+                const statusLabel = approaching
+                  ? 'A caminho'
+                  : atStation
+                    ? isSegmentRunning(run)
+                      ? 'No WOD'
+                      : 'Aguardando início'
+                    : 'Em prova';
+                return (
+                  <Card
+                    key={participantKey(run.participant)}
+                    title={`#${run.participant.bib} ${run.participant.label}`}
+                    subtitle={`${statusLabel} · Tempo total: ${formatMs(getTotalMs(run, stationNow))}`}
+                    badge="Na estação"
+                  />
+                );
+              })
+            )}
+            <Button
+              label="Abrir cronômetro da estação"
+              variant="primary"
+              onPress={() => router.push('/(tabs)/timing')}
+              style={{ marginBottom: 16 }}
+            />
+          </>
         )}
 
         {!isJudgeView && (
@@ -441,7 +526,7 @@ export default function EventDetailScreen() {
               <Text style={styles.sectionTitle}>Juízes ({staff.length})</Text>
               {perms.canManageJudges && (
                 <Button
-                  label="Designar"
+                  label="Cadastrar"
                   variant="secondary"
                   onPress={() => router.push(`/event/${eventId}/judges`)}
                   style={styles.manageBtn}
@@ -451,7 +536,7 @@ export default function EventDetailScreen() {
             {staff.length === 0 ? (
               <Text style={styles.moreText}>
                 {perms.canManageJudges
-                  ? 'Nenhum juiz designado. Toque em Designar para adicionar.'
+                  ? 'Nenhum juiz cadastrado. Toque em Cadastrar para adicionar.'
                   : 'Nenhum juiz designado para este evento.'}
               </Text>
             ) : (
