@@ -68,6 +68,68 @@ function resolveSupabaseConfig(): { url: string; anonKey: string } {
   return { url, anonKey };
 }
 
+const SUPABASE_PROJECT_REF_KEY = 'hyrox-supabase-project-ref';
+
+export function getSupabaseProjectRef(url?: string): string | null {
+  const target = url ?? resolveSupabaseConfig().url;
+  try {
+    return new URL(target).hostname.split('.')[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+export type SupabaseDiagnostics = {
+  projectRef: string | null;
+  url: string;
+  keyKind: 'publishable' | 'jwt' | 'unknown';
+  keyPreview: string;
+};
+
+export function getSupabaseDiagnostics(): SupabaseDiagnostics {
+  const { url, anonKey } = resolveSupabaseConfig();
+  const keyKind = anonKey.startsWith('sb_publishable_')
+    ? 'publishable'
+    : anonKey.startsWith('eyJ')
+      ? 'jwt'
+      : 'unknown';
+  const keyPreview =
+    anonKey.length <= 12 ? anonKey : `${anonKey.slice(0, 16)}…${anonKey.slice(-6)}`;
+  return {
+    projectRef: getSupabaseProjectRef(url),
+    url,
+    keyKind,
+    keyPreview,
+  };
+}
+
+/** Remove sessões de outro projeto Supabase (ex.: APK antigo no mesmo aparelho). */
+export async function ensureSupabaseProjectStorage(): Promise<boolean> {
+  const ref = getSupabaseProjectRef();
+  if (!ref) return false;
+
+  let cleared = false;
+  try {
+    const storedRef = await AsyncStorage.getItem(SUPABASE_PROJECT_REF_KEY);
+    const keys = await AsyncStorage.getAllKeys();
+    const foreignAuthKeys = keys.filter((key) => {
+      const match = /^sb-([a-z0-9]+)-auth-token/.exec(key);
+      return match != null && match[1] !== ref;
+    });
+
+    if ((storedRef && storedRef !== ref) || foreignAuthKeys.length > 0) {
+      await clearSupabaseAuthStorage();
+      cleared = true;
+    }
+
+    await AsyncStorage.setItem(SUPABASE_PROJECT_REF_KEY, ref);
+  } catch {
+    // ignore
+  }
+
+  return cleared;
+}
+
 let client: SupabaseClient | null = null;
 let activeConfig: { url: string; anonKey: string } | null = null;
 

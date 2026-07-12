@@ -1,6 +1,6 @@
 import { Stack } from 'expo-router';
 import { useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Screen } from '@/components/ui/Screen';
@@ -13,9 +13,11 @@ import {
 } from '@/src/domain/appRole';
 import { useAccessModeStore } from '@/src/stores/accessModeStore';
 import { useAuthStore } from '@/src/stores/authStore';
+import { getSupabaseDiagnostics, isSupabaseConfigured } from '@/src/lib/supabase';
 import { navigateToEventsHome } from '@/src/utils/navigation';
 
 const LOGIN_ROLES: AppUserRole[] = ['organizer', 'judge', 'athlete'];
+const supabaseDiagnostics = isSupabaseConfigured() ? getSupabaseDiagnostics() : null;
 
 export default function AuthScreen() {
   const { signIn, signUp, signOut, resetPassword, loading, user } = useAuthStore();
@@ -68,6 +70,16 @@ export default function AuthScreen() {
     );
   }
 
+  async function handleClearCache() {
+    setError('');
+    await signOut();
+    setPassword('');
+    Alert.alert(
+      'Cache limpo',
+      'Dados de login antigos foram removidos. Tente entrar de novo com seu e-mail e senha.',
+    );
+  }
+
   async function handleSignOut() {
     await signOut();
     setPassword('');
@@ -83,7 +95,7 @@ export default function AuthScreen() {
           headerTintColor: HyroxTheme.text,
         }}
       />
-      <Screen scroll>
+      <Screen scroll keyboardOffset={Platform.OS === 'ios' ? 88 : 24}>
         <Text style={styles.heading}>Entrar no App Hyrox</Text>
         <Text style={styles.subheading}>
           Organizadores e atletas criam conta aqui. Juízes entram com o e-mail e a senha
@@ -200,6 +212,23 @@ export default function AuthScreen() {
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
+        {mode === 'login' && (
+          <Button
+            label="Limpar cache de login"
+            variant="secondary"
+            disabled={loading}
+            onPress={handleClearCache}
+            style={styles.clearCacheBtn}
+          />
+        )}
+
+        {supabaseDiagnostics ? (
+          <Text style={styles.diagnostics}>
+            Nuvem: {supabaseDiagnostics.projectRef ?? 'não configurada'} · chave{' '}
+            {supabaseDiagnostics.keyKind}
+          </Text>
+        ) : null}
+
         {mode === 'signup' && (
           <Button
             label="Criar conta"
@@ -270,6 +299,14 @@ const styles = StyleSheet.create({
   modeRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
   modeBtn: { flex: 1 },
   resetBtn: { marginBottom: 12 },
+  clearCacheBtn: { marginBottom: 12 },
+  diagnostics: {
+    color: HyroxTheme.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 4,
+    marginBottom: 12,
+  },
   error: { color: HyroxTheme.danger, marginBottom: 12, fontSize: 14 },
   submit: { marginTop: 8, marginBottom: 12 },
 });

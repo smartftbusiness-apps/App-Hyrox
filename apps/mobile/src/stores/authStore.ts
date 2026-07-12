@@ -9,6 +9,7 @@ import { fromSupabaseProfileRole, toSupabaseProfileRole } from '@/src/domain/app
 import { getAuthRedirectUrl } from '@/src/lib/authRedirect';
 import {
   clearSupabaseAuthStorage,
+  ensureSupabaseProjectStorage,
   getSupabase,
   isSupabaseConfigured,
   resetSupabaseClient,
@@ -200,7 +201,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     }
 
-
+    await ensureSupabaseProjectStorage();
 
     const supabase = getSupabase();
 
@@ -258,6 +259,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     set({ loading: true });
 
     try {
+
+      await ensureSupabaseProjectStorage();
 
       let { data, error } = await getSupabase().auth.signInWithPassword({
         email: email.trim().toLowerCase(),

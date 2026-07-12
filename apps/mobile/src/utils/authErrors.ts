@@ -22,7 +22,10 @@ export function translateAuthError(message: string): string {
   if (lower.includes('request path invalid') || lower.includes('redirect')) {
     return 'Link de confirmação inválido. No Supabase, em Authentication → URL Configuration, adicione apphyrox://auth em Redirect URLs.';
   }
-  if (lower.includes('invalid api key') || lower.includes('invalid jwt')) {
+  if (lower.includes('invalid jwt')) {
+    return 'Sessão antiga ou expirada neste celular. Toque em "Limpar cache" na tela de conta e entre de novo.';
+  }
+  if (lower.includes('invalid api key')) {
     return 'Chave do Supabase inválida neste APK. Desinstale o app, instale o build mais recente e tente de novo.';
   }
 
@@ -36,7 +39,10 @@ export function translateSyncError(error: unknown): string {
   if (lower.includes('schema cache') || lower.includes('could not find the table')) {
     return 'As tabelas do app ainda não existem no Supabase. Rode o arquivo setup_completo.sql no SQL Editor do projeto.';
   }
-  if (lower.includes('invalid api key') || lower.includes('invalid jwt')) {
+  if (lower.includes('invalid jwt')) {
+    return 'Sessão antiga na nuvem. Saia da conta, use "Limpar cache" e entre de novo.';
+  }
+  if (lower.includes('invalid api key')) {
     return 'Chave do Supabase inválida. Confira o arquivo .env ou gere um APK novo.';
   }
 
