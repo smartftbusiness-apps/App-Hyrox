@@ -22,6 +22,9 @@ export function translateAuthError(message: string): string {
   if (lower.includes('request path invalid') || lower.includes('redirect')) {
     return 'Link de confirmação inválido. No Supabase, em Authentication → URL Configuration, adicione apphyrox://auth em Redirect URLs.';
   }
+  if (lower.includes('no api key found')) {
+    return 'Configuração do Supabase ausente neste APK. Instale o build mais recente (jwt-v2).';
+  }
   if (lower.includes('invalid jwt')) {
     return 'Sessão antiga ou expirada neste celular. Toque em "Limpar cache" na tela de conta e entre de novo.';
   }
