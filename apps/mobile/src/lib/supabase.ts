@@ -10,14 +10,11 @@ type SupabaseExtra = {
 };
 
 function readExtra(): SupabaseExtra {
-  const c = Constants as typeof Constants & {
-    manifest?: { extra?: SupabaseExtra };
-    manifest2?: { extra?: { expoClient?: { extra?: SupabaseExtra } } };
+  const fromExpo = Constants.expoConfig?.extra as SupabaseExtra | undefined;
+  return {
+    supabaseUrl: fromExpo?.supabaseUrl?.trim() || productionDefaults.url,
+    supabaseAnonKey: fromExpo?.supabaseAnonKey?.trim() || productionDefaults.anonKey,
   };
-  const fromExpo = c.expoConfig?.extra as SupabaseExtra | undefined;
-  const fromManifest = c.manifest?.extra;
-  const fromManifest2 = c.manifest2?.extra?.expoClient?.extra;
-  return { ...fromManifest2, ...fromManifest, ...fromExpo };
 }
 
 function isValidAnonKey(key: string): boolean {
@@ -55,17 +52,30 @@ function pickFirstValidKey(...candidates: Array<string | undefined>): string {
 
 function resolveSupabaseConfig(): { url: string; anonKey: string } {
   const extra = readExtra();
-  const url = pickFirstValidUrl(
-    extra.supabaseUrl,
-    process.env.EXPO_PUBLIC_SUPABASE_URL,
-    productionDefaults.url,
-  );
-  const anonKey = pickFirstValidKey(
-    extra.supabaseAnonKey,
-    process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
-    productionDefaults.anonKey,
-  );
+  const url = pickFirstValidUrl(extra.supabaseUrl, productionDefaults.url);
+  const anonKey = pickFirstValidKey(extra.supabaseAnonKey, productionDefaults.anonKey);
   return { url, anonKey };
+}
+
+export type SupabaseConnectionStatus = 'ok' | 'invalid_key' | 'offline' | 'not_configured';
+
+/** Testa se a chave embutida no app é aceita pelo Supabase Auth. */
+export async function verifySupabaseConnection(): Promise<SupabaseConnectionStatus> {
+  if (!isSupabaseConfigured()) return 'not_configured';
+  const { url, anonKey } = resolveSupabaseConfig();
+  try {
+    const response = await fetch(`${url}/auth/v1/settings`, {
+      headers: {
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
+      },
+    });
+    if (response.status === 401 || response.status === 403) return 'invalid_key';
+    if (!response.ok) return 'offline';
+    return 'ok';
+  } catch {
+    return 'offline';
+  }
 }
 
 const SUPABASE_PROJECT_REF_KEY = 'hyrox-supabase-project-ref';

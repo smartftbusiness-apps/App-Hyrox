@@ -1,5 +1,5 @@
 import { Stack } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -13,11 +13,10 @@ import {
 } from '@/src/domain/appRole';
 import { useAccessModeStore } from '@/src/stores/accessModeStore';
 import { useAuthStore } from '@/src/stores/authStore';
-import { getSupabaseDiagnostics, isSupabaseConfigured } from '@/src/lib/supabase';
+import { getSupabaseDiagnostics, isSupabaseConfigured, verifySupabaseConnection } from '@/src/lib/supabase';
 import { navigateToEventsHome } from '@/src/utils/navigation';
 
 const LOGIN_ROLES: AppUserRole[] = ['organizer', 'judge', 'athlete'];
-const supabaseDiagnostics = isSupabaseConfigured() ? getSupabaseDiagnostics() : null;
 
 export default function AuthScreen() {
   const { signIn, signUp, signOut, resetPassword, loading, user } = useAuthStore();
@@ -28,6 +27,18 @@ export default function AuthScreen() {
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [error, setError] = useState('');
+  const [connectionStatus, setConnectionStatus] = useState<string>('');
+
+  const supabaseDiagnostics = isSupabaseConfigured() ? getSupabaseDiagnostics() : null;
+
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+    void verifySupabaseConnection().then((status) => {
+      if (status === 'ok') setConnectionStatus('Conexão com a nuvem: OK');
+      else if (status === 'invalid_key') setConnectionStatus('Conexão com a nuvem: chave inválida neste build');
+      else if (status === 'offline') setConnectionStatus('Conexão com a nuvem: sem internet ou servidor indisponível');
+    });
+  }, []);
 
   async function handleSubmit() {
     setError('');
@@ -225,7 +236,8 @@ export default function AuthScreen() {
         {supabaseDiagnostics ? (
           <Text style={styles.diagnostics}>
             Nuvem: {supabaseDiagnostics.projectRef ?? 'não configurada'} · chave{' '}
-            {supabaseDiagnostics.keyKind}
+            {supabaseDiagnostics.keyKind} · {supabaseDiagnostics.keyPreview}
+            {connectionStatus ? `\n${connectionStatus}` : ''}
           </Text>
         ) : null}
 

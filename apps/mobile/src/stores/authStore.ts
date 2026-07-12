@@ -13,6 +13,7 @@ import {
   getSupabase,
   isSupabaseConfigured,
   resetSupabaseClient,
+  verifySupabaseConnection,
 } from '@/src/lib/supabase';
 
 import { pullAndMergeFromSupabase, pullAndMergeAthleteEvents, pullAndMergeJudgeEvents } from '@/src/api/syncService';
@@ -203,6 +204,11 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
     await ensureSupabaseProjectStorage();
 
+    const connection = await verifySupabaseConnection();
+    if (connection === 'invalid_key') {
+      await clearSupabaseAuthStorage();
+    }
+
     const supabase = getSupabase();
 
     let data: Awaited<ReturnType<typeof supabase.auth.getSession>>['data'];
@@ -261,6 +267,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     try {
 
       await ensureSupabaseProjectStorage();
+      await clearSupabaseAuthStorage();
 
       let { data, error } = await getSupabase().auth.signInWithPassword({
         email: email.trim().toLowerCase(),
