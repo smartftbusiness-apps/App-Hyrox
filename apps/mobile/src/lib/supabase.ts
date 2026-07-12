@@ -1,60 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Constants from 'expo-constants';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { EventStatus } from '@/src/domain/types';
-import productionDefaults from '../../supabase.config.json';
-
-type SupabaseExtra = {
-  supabaseUrl?: string;
-  supabaseAnonKey?: string;
-};
-
-function readExtra(): SupabaseExtra {
-  const fromExpo = Constants.expoConfig?.extra as SupabaseExtra | undefined;
-  return {
-    supabaseUrl: fromExpo?.supabaseUrl?.trim() || productionDefaults.url,
-    supabaseAnonKey: fromExpo?.supabaseAnonKey?.trim() || productionDefaults.anonKey,
-  };
-}
-
-function isValidAnonKey(key: string): boolean {
-  const trimmed = key?.trim();
-  if (!trimmed || trimmed.includes('sua_anon_key') || trimmed.includes('SEU_')) return false;
-  if (trimmed.startsWith('sb_publishable_')) return trimmed.length > 20;
-  const parts = trimmed.split('.');
-  return parts.length === 3 && trimmed.startsWith('eyJ');
-}
-
-function isValidSupabaseUrl(url: string): boolean {
-  if (!url || url.includes('SEU_PROJECT_REF')) return false;
-  try {
-    return new URL(url).hostname.endsWith('supabase.co');
-  } catch {
-    return false;
-  }
-}
-
-function pickFirstValidUrl(...candidates: Array<string | undefined>): string {
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim();
-    if (trimmed && isValidSupabaseUrl(trimmed)) return trimmed;
-  }
-  return productionDefaults.url;
-}
-
-function pickFirstValidKey(...candidates: Array<string | undefined>): string {
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim();
-    if (trimmed && isValidAnonKey(trimmed)) return trimmed;
-  }
-  return productionDefaults.anonKey;
-}
+import {
+  SUPABASE_ANON_KEY,
+  SUPABASE_BUILD_ID,
+  SUPABASE_URL,
+} from '@/src/lib/supabaseConfig';
 
 function resolveSupabaseConfig(): { url: string; anonKey: string } {
-  const extra = readExtra();
-  const url = pickFirstValidUrl(extra.supabaseUrl, productionDefaults.url);
-  const anonKey = pickFirstValidKey(extra.supabaseAnonKey, productionDefaults.anonKey);
-  return { url, anonKey };
+  return { url: SUPABASE_URL, anonKey: SUPABASE_ANON_KEY };
 }
 
 export type SupabaseConnectionStatus = 'ok' | 'invalid_key' | 'offline' | 'not_configured';
@@ -94,6 +48,8 @@ export type SupabaseDiagnostics = {
   url: string;
   keyKind: 'publishable' | 'jwt' | 'unknown';
   keyPreview: string;
+  buildId: string;
+  keyLength: number;
 };
 
 export function getSupabaseDiagnostics(): SupabaseDiagnostics {
@@ -110,7 +66,14 @@ export function getSupabaseDiagnostics(): SupabaseDiagnostics {
     url,
     keyKind,
     keyPreview,
+    buildId: SUPABASE_BUILD_ID,
+    keyLength: anonKey.length,
   };
+}
+
+export function isSupabaseConfigured(): boolean {
+  const { url, anonKey } = resolveSupabaseConfig();
+  return !!url && !!anonKey && anonKey.length > 40;
 }
 
 /** Remove sessões de outro projeto Supabase (ex.: APK antigo no mesmo aparelho). */
@@ -141,20 +104,9 @@ export async function ensureSupabaseProjectStorage(): Promise<boolean> {
 }
 
 let client: SupabaseClient | null = null;
-let activeConfig: { url: string; anonKey: string } | null = null;
-
-export function isSupabaseConfigured(): boolean {
-  const { url, anonKey } = resolveSupabaseConfig();
-  return isValidSupabaseUrl(url) && isValidAnonKey(anonKey);
-}
-
-export function getSupabaseConfig(): { url: string; anonKey: string } {
-  return resolveSupabaseConfig();
-}
 
 export function resetSupabaseClient(): void {
   client = null;
-  activeConfig = null;
 }
 
 /** Limpa sessão antiga (ex.: troca de projeto Supabase no mesmo aparelho) */
@@ -171,6 +123,10 @@ export async function clearSupabaseAuthStorage(): Promise<void> {
   resetSupabaseClient();
 }
 
+export function getSupabaseConfig(): { url: string; anonKey: string } {
+  return resolveSupabaseConfig();
+}
+
 export function getSupabase(): SupabaseClient {
   if (!isSupabaseConfigured()) {
     throw new Error(
@@ -179,12 +135,8 @@ export function getSupabase(): SupabaseClient {
   }
 
   const config = resolveSupabaseConfig();
-  const configChanged =
-    !activeConfig ||
-    activeConfig.url !== config.url ||
-    activeConfig.anonKey !== config.anonKey;
 
-  if (!client || configChanged) {
+  if (!client) {
     client = createClient(config.url, config.anonKey, {
       auth: {
         storage: AsyncStorage,
@@ -193,7 +145,6 @@ export function getSupabase(): SupabaseClient {
         detectSessionInUrl: false,
       },
     });
-    activeConfig = config;
   }
 
   return client;

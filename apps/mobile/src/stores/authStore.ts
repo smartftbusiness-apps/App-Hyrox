@@ -7,6 +7,7 @@ import type { AppUserRole } from '@/src/domain/appRole';
 import { fromSupabaseProfileRole, toSupabaseProfileRole } from '@/src/domain/appRole';
 
 import { getAuthRedirectUrl } from '@/src/lib/authRedirect';
+import { signInWithPasswordDirect } from '@/src/lib/supabaseAuth';
 import {
   clearSupabaseAuthStorage,
   ensureSupabaseProjectStorage,
@@ -86,7 +87,7 @@ async function assertJudgeProfile(userId: string): Promise<AuthActionResult | nu
     .eq('id', userId)
     .maybeSingle();
 
-  if (error) return { ok: false, reason: error.message };
+  if (error) return { ok: false, reason: translateAuthError(error.message) };
   if (data?.role !== 'staff') {
     return {
       ok: false,
@@ -147,6 +148,41 @@ function isInvalidApiKeyError(message: string): boolean {
 async function recoverFromInvalidApiKey(): Promise<void> {
   await clearSupabaseAuthStorage();
   resetSupabaseClient();
+}
+
+async function signInAndEstablishSession(
+  email: string,
+  password: string,
+): Promise<{ data: { session: Session | null; user: User | null }; error: { message: string } | null }> {
+  const normalizedEmail = email.trim().toLowerCase();
+
+  let { data, error } = await getSupabase().auth.signInWithPassword({
+    email: normalizedEmail,
+    password,
+  });
+
+  if (!error) return { data, error: null };
+
+  const shouldRetryDirect =
+    isInvalidApiKeyError(error.message) ||
+    error.message.toLowerCase().includes('no api key found');
+
+  if (!shouldRetryDirect) return { data, error };
+
+  await recoverFromInvalidApiKey();
+
+  try {
+    const tokens = await signInWithPasswordDirect(normalizedEmail, password);
+    const { data: sessionData, error: sessionError } = await getSupabase().auth.setSession({
+      access_token: tokens.accessToken,
+      refresh_token: tokens.refreshToken,
+    });
+    if (sessionError) return { data: { session: null, user: null }, error: sessionError };
+    return { data: sessionData, error: null };
+  } catch (directError) {
+    const message = directError instanceof Error ? directError.message : String(directError);
+    return { data: { session: null, user: null }, error: { message } };
+  }
 }
 
 async function syncAfterAuth(userId: string, userEmail?: string | null): Promise<string | undefined> {
@@ -268,19 +304,9 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
 
       await ensureSupabaseProjectStorage();
       await clearSupabaseAuthStorage();
+      resetSupabaseClient();
 
-      let { data, error } = await getSupabase().auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
-        password,
-      });
-
-      if (error && isInvalidApiKeyError(error.message)) {
-        await recoverFromInvalidApiKey();
-        ({ data, error } = await getSupabase().auth.signInWithPassword({
-          email: email.trim().toLowerCase(),
-          password,
-        }));
-      }
+      let { data, error } = await signInAndEstablishSession(email, password);
 
       if (error) return { ok: false, reason: translateAuthError(error.message) };
 

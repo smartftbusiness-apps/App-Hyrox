@@ -235,8 +235,12 @@ export default function AuthScreen() {
 
         {supabaseDiagnostics ? (
           <Text style={styles.diagnostics}>
+            Build: {supabaseDiagnostics.buildId}
+            {'\n'}
             Nuvem: {supabaseDiagnostics.projectRef ?? 'não configurada'} · chave{' '}
-            {supabaseDiagnostics.keyKind} · {supabaseDiagnostics.keyPreview}
+            {supabaseDiagnostics.keyKind} ({supabaseDiagnostics.keyLength} chars)
+            {'\n'}
+            {supabaseDiagnostics.keyPreview}
             {connectionStatus ? `\n${connectionStatus}` : ''}
           </Text>
         ) : null}
