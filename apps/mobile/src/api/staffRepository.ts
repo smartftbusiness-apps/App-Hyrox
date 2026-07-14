@@ -86,11 +86,15 @@ async function lookupUserIdByEmail(email: string): Promise<string | null> {
 async function insertEventStaff(
   eventSupabaseId: string,
   userId: string,
-  stationOrder: number,
+  stationOrder: number | null,
 ): Promise<RepositoryResult<string>> {
   const { data, error } = await getSupabase()
     .from('event_staff')
-    .insert({ event_id: eventSupabaseId, user_id: userId, station_order: stationOrder })
+    .insert({
+      event_id: eventSupabaseId,
+      user_id: userId,
+      station_order: stationOrder,
+    })
     .select('id')
     .single();
 
@@ -261,19 +265,19 @@ export async function fetchOrganizerJudges(): Promise<OrganizerJudge[]> {
 export async function assignExistingJudgeToEvent(
   eventSupabaseId: string,
   userId: string,
-  stationOrder: number,
+  stationOrder?: number | null,
 ): Promise<RepositoryResult<string>> {
   if (!isSupabaseConfigured()) {
     return { ok: false, reason: 'Supabase não configurado' };
   }
-  if (!stationOrder || stationOrder < 1) {
+  if (stationOrder != null && stationOrder < 1) {
     return { ok: false, reason: 'Selecione a estação do juiz' };
   }
 
   const organizerCheck = await assertOrganizerOwnsEvent(eventSupabaseId);
   if (!organizerCheck.ok) return organizerCheck;
 
-  return insertEventStaff(eventSupabaseId, userId, stationOrder);
+  return insertEventStaff(eventSupabaseId, userId, stationOrder ?? null);
 }
 
 export async function fetchStaffForEvent(eventSupabaseId: string): Promise<EventStaffMember[]> {
@@ -334,7 +338,7 @@ export async function registerJudgeForEvent(
   fullName: string,
   email: string,
   password: string,
-  stationOrder: number,
+  stationOrder?: number | null,
 ): Promise<RepositoryResult<RegisterJudgeResult>> {
   if (!isSupabaseConfigured()) {
     return { ok: false, reason: 'Supabase não configurado' };
@@ -344,7 +348,7 @@ export async function registerJudgeForEvent(
   const trimmed = email.trim().toLowerCase();
   if (!name) return { ok: false, reason: 'Informe o nome do juiz' };
   if (!trimmed) return { ok: false, reason: 'Informe o e-mail do juiz' };
-  if (!stationOrder || stationOrder < 1) {
+  if (stationOrder != null && stationOrder < 1) {
     return { ok: false, reason: 'Selecione a estação do juiz' };
   }
 
@@ -424,7 +428,7 @@ export async function registerJudgeForEvent(
     };
   }
 
-  const inserted = await insertEventStaff(eventSupabaseId, userId, stationOrder);
+  const inserted = await insertEventStaff(eventSupabaseId, userId, stationOrder ?? null);
   if (!inserted.ok) return inserted;
 
   return {
