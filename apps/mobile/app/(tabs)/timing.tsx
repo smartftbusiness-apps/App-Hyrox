@@ -29,7 +29,6 @@ import {
 import { formatMs } from '@/src/utils/formatTime';
 import {
   buildRunsFromSnapshots,
-  fetchJudgeStationCloudRuns,
   fetchLiveTimingSnapshots,
   pushTimingRunState,
   startLiveRunInCloud,
@@ -59,20 +58,16 @@ import {
   isJudgeManagingParticipant,
   isParticipantApproachingStation,
   isParticipantAtStation,
+  isParticipantVisibleToJudge,
   stationLabel,
 } from '@/src/utils/stationTiming';
-
-function canControlEventTiming(event: HyroxEvent, isJudgeMode: boolean): boolean {
-  if (isJudgeMode) {
-    return useEventStaffStore.getState().isAssignedJudge(event.id);
-  }
-  return useOrganizerStore.getState().isEventOwner(event.organizerId);
-}
 
 export default function TimingScreen() {
   const { width } = useWindowDimensions();
   const isJudgeMode = useIsJudgeMode();
   const authUserId = useAuthStore((s) => s.user?.id);
+  const assignedEventIds = useEventStaffStore((s) => s.assignedEventIds);
+  const isEventOwner = useOrganizerStore((s) => s.isEventOwner);
   const contentWidth = Math.min(width, 720);
   const narrow = contentWidth < 380;
   const compact = contentWidth < 420;
@@ -83,11 +78,14 @@ export default function TimingScreen() {
   const timingEvents = useMemo(
     () =>
       events.filter((e) => {
-        if (!canControlEventTiming(e, isJudgeMode)) return false;
-        if (isJudgeMode) return e.status === 'live' || e.status === 'open';
+        if (isJudgeMode) {
+          if (!assignedEventIds.includes(e.id)) return false;
+          return e.status === 'live' || e.status === 'open';
+        }
+        if (!isEventOwner(e.organizerId)) return false;
         return e.status === 'live' || e.status === 'open';
       }),
-    [events, isJudgeMode],
+    [events, isJudgeMode, assignedEventIds, isEventOwner],
   );
 
   const [pickedEventId, setPickedEventId] = useState<string | null>(null);
@@ -126,7 +124,7 @@ export default function TimingScreen() {
     if (isJudgeView) {
       if (judgeStationOrder == null) return [];
       list = list.filter((run) =>
-        isJudgeManagingParticipant(run, segments, judgeStationOrder),
+        isParticipantVisibleToJudge(run, segments, judgeStationOrder),
       );
     }
     return list.sort((a, b) => a.participant.bib - b.participant.bib);
@@ -190,30 +188,39 @@ export default function TimingScreen() {
         }
         await syncJudgeEventLive(eventId);
 
-        if (judgeStationOrder == null) return;
+        const snapshots = await fetchLiveTimingSnapshots(eventId);
+        if (!snapshots.length) return;
 
-        const cloudRuns = await fetchJudgeStationCloudRuns(eventId, judgeStationOrder);
+        const cloudRuns = buildRunsFromSnapshots(
+          snapshots,
+          eventId,
+          participants,
+          segments,
+        );
+        if (!cloudRuns.size) return;
 
         setRuns((prev) => {
-          if (!cloudRuns.size) return prev;
-          const next: Record<string, TimingRunState> = {};
+          const next = { ...prev };
+          let changed = false;
           for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
             const local = prev[key];
             const cloudUpdatedAt = new Date(updatedAt).getTime();
-            next[key] =
-              local &&
-              !isCloudTimingAhead(
-                local,
-                cloudRun,
-                cloudUpdatedAt,
-                localTouchedAtRef.current[key],
-              )
-                ? local
-                : cloudRun;
+            if (
+              !isCloudTimingAhead(local, cloudRun, cloudUpdatedAt, localTouchedAtRef.current[key])
+            ) {
+              continue;
+            }
+            next[key] = cloudRun;
+            changed = true;
           }
-          const keys = Object.keys(next);
+          if (!changed) return prev;
+          const visibleKeys = judgeStationOrder == null
+            ? Object.keys(next)
+            : Object.keys(next).filter((key) =>
+                isParticipantVisibleToJudge(next[key], segments, judgeStationOrder),
+              );
           setActiveKey((current) =>
-            current && keys.includes(current) ? current : keys[0] ?? null,
+            current && visibleKeys.includes(current) ? current : visibleKeys[0] ?? null,
           );
           return next;
         });
@@ -399,7 +406,7 @@ export default function TimingScreen() {
       if (
         isJudgeView &&
         judgeStationOrder != null &&
-        !isJudgeManagingParticipant(nextRun, segments, judgeStationOrder)
+        !isParticipantVisibleToJudge(nextRun, segments, judgeStationOrder)
       ) {
         delete next[key];
         const remaining = Object.keys(next);

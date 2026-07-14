@@ -11,7 +11,7 @@ import { useAthletesStore } from '@/src/stores/athletesStore';
 import { useEventsStore } from '@/src/stores/eventsStore';
 
 import { buildTimingParticipants, type TimingParticipant } from '@/src/utils/participantHelpers';
-import { isRunAtJudgeStation } from '@/src/utils/stationTiming';
+import { isParticipantVisibleToJudge, isRunAtJudgeStation } from '@/src/utils/stationTiming';
 
 import {
 
@@ -217,7 +217,10 @@ export async function fetchJudgeStationCloudRuns(
   for (const [key, entry] of all) {
     const snapshot = snapshotByKey.get(key);
     if (!snapshot) continue;
-    if (isRunAtJudgeStation(entry.run, snapshot, segments, stationOrder)) {
+    if (
+      isRunAtJudgeStation(entry.run, snapshot, segments, stationOrder) ||
+      isParticipantVisibleToJudge(entry.run, segments, stationOrder)
+    ) {
       filtered.set(key, entry);
     }
   }

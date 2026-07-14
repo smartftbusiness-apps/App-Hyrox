@@ -146,6 +146,19 @@ export function isJudgeManagingParticipant(
 
 }
 
+/** Atleta ainda não passou pela estação do juiz (inclui corrida inicial da bateria). */
+export function isParticipantVisibleToJudge(
+  run: TimingRunState,
+  segments: Segment[],
+  stationOrder: number,
+): boolean {
+  if (run.raceComplete) return false;
+  if (isJudgeManagingParticipant(run, segments, stationOrder)) return true;
+  const order = getCurrentSegmentOrder(run, segments);
+  if (order == null) return false;
+  return order <= stationOrder;
+}
+
 
 
 /** Snapshot na nuvem indica segmento atual = esta estação. */
