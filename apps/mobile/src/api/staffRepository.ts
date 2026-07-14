@@ -332,28 +332,37 @@ export async function fetchMyJudgeAssignments(): Promise<JudgeAssignmentRow[]> {
   return data as JudgeAssignmentRow[];
 }
 
-/** Organizador cria a conta do juiz (se necessário) e designa ao evento. */
-export async function registerJudgeForEvent(
-  eventSupabaseId: string,
+async function addJudgeToOrganizerRoster(userId: string): Promise<RepositoryResult<void>> {
+  const { error } = await getSupabase().rpc('add_organizer_judge_to_roster', {
+    p_user_id: userId,
+  });
+
+  if (error) {
+    const msg = error.message.toLowerCase();
+    if (msg.includes('function') && msg.includes('does not exist')) {
+      return { ok: true, data: undefined };
+    }
+    return { ok: false, reason: error.message };
+  }
+
+  return { ok: true, data: undefined };
+}
+
+async function provisionJudgeAccount(
   fullName: string,
   email: string,
   password: string,
-  stationOrder?: number | null,
-): Promise<RepositoryResult<RegisterJudgeResult>> {
-  if (!isSupabaseConfigured()) {
-    return { ok: false, reason: 'Supabase não configurado' };
-  }
-
+): Promise<
+  RepositoryResult<{
+    userId: string;
+    createdAccount: boolean;
+    loginReady: boolean;
+  }>
+> {
   const name = fullName.trim();
   const trimmed = email.trim().toLowerCase();
   if (!name) return { ok: false, reason: 'Informe o nome do juiz' };
   if (!trimmed) return { ok: false, reason: 'Informe o e-mail do juiz' };
-  if (stationOrder != null && stationOrder < 1) {
-    return { ok: false, reason: 'Selecione a estação do juiz' };
-  }
-
-  const organizerCheck = await assertOrganizerOwnsEvent(eventSupabaseId);
-  if (!organizerCheck.ok) return organizerCheck;
 
   try {
     await bootstrapOrganizerProfile();
@@ -428,12 +437,70 @@ export async function registerJudgeForEvent(
     };
   }
 
-  const inserted = await insertEventStaff(eventSupabaseId, userId, stationOrder ?? null);
+  const roster = await addJudgeToOrganizerRoster(userId);
+  if (!roster.ok) return roster;
+
+  return { ok: true, data: { userId, createdAccount, loginReady } };
+}
+
+/** Cadastra juiz na conta do organizador (sem designar a um evento ainda). */
+export async function registerOrganizerJudge(
+  fullName: string,
+  email: string,
+  password: string,
+): Promise<RepositoryResult<RegisterJudgeResult>> {
+  if (!isSupabaseConfigured()) {
+    return { ok: false, reason: 'Supabase não configurado' };
+  }
+
+  const provisioned = await provisionJudgeAccount(fullName, email, password);
+  if (!provisioned.ok) return provisioned;
+
+  return {
+    ok: true,
+    data: {
+      staffId: provisioned.data.userId,
+      createdAccount: provisioned.data.createdAccount,
+      loginReady: provisioned.data.loginReady,
+    },
+  };
+}
+/** Organizador cria a conta do juiz (se necessário) e designa ao evento. */
+export async function registerJudgeForEvent(
+  eventSupabaseId: string,
+  fullName: string,
+  email: string,
+  password: string,
+  stationOrder?: number | null,
+): Promise<RepositoryResult<RegisterJudgeResult>> {
+  if (!isSupabaseConfigured()) {
+    return { ok: false, reason: 'Supabase não configurado' };
+  }
+
+  if (stationOrder != null && stationOrder < 1) {
+    return { ok: false, reason: 'Selecione a estação do juiz' };
+  }
+
+  const organizerCheck = await assertOrganizerOwnsEvent(eventSupabaseId);
+  if (!organizerCheck.ok) return organizerCheck;
+
+  const provisioned = await provisionJudgeAccount(fullName, email, password);
+  if (!provisioned.ok) return provisioned;
+
+  const inserted = await insertEventStaff(
+    eventSupabaseId,
+    provisioned.data.userId,
+    stationOrder ?? null,
+  );
   if (!inserted.ok) return inserted;
 
   return {
     ok: true,
-    data: { staffId: inserted.data!, createdAccount, loginReady },
+    data: {
+      staffId: inserted.data!,
+      createdAccount: provisioned.data.createdAccount,
+      loginReady: provisioned.data.loginReady,
+    },
   };
 }
 
@@ -485,6 +552,22 @@ export async function updateEventStaffStation(
   const { error } = await getSupabase()
     .from('event_staff')
     .update({ station_order: stationOrder })
+    .eq('id', staffRowId);
+
+  if (error) return { ok: false, reason: error.message };
+  return { ok: true, data: undefined };
+}
+
+export async function clearEventStaffStation(
+  staffRowId: string,
+): Promise<RepositoryResult<void>> {
+  if (!isSupabaseConfigured()) {
+    return { ok: false, reason: 'Supabase não configurado' };
+  }
+
+  const { error } = await getSupabase()
+    .from('event_staff')
+    .update({ station_order: null })
     .eq('id', staffRowId);
 
   if (error) return { ok: false, reason: error.message };

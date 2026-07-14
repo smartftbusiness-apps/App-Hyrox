@@ -10,10 +10,12 @@ import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
 import {
   assignExistingJudgeToEvent,
+  clearEventStaffStation,
   fetchOrganizerJudges,
   fetchStaffForEvent,
   reactivateJudgeLogin,
   registerJudgeForEvent,
+  registerOrganizerJudge,
   removeEventStaff,
   updateEventStaffStation,
   type OrganizerJudge,
@@ -42,14 +44,11 @@ export default function EventJudgesScreen() {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [stationOrder, setStationOrder] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [organizerJudges, setOrganizerJudges] = useState<OrganizerJudge[]>(EMPTY_ORGANIZER_JUDGES);
   const staff =
     useEventStaffStore((s) => (eventId ? s.staffByEvent[eventId] : undefined)) ?? EMPTY_STAFF;
-
-  const stationOptions = event ? stationSegmentOptions(event.segments) : [];
 
   useEffect(() => {
     if (!eventId || !event || !perms.canManageJudges) return;
@@ -94,12 +93,6 @@ export default function EventJudgesScreen() {
   useEffect(() => {
     void loadStaff();
   }, [loadStaff]);
-
-  useEffect(() => {
-    if (stationOptions.length && stationOrder == null) {
-      setStationOrder(stationOptions[0].order);
-    }
-  }, [stationOptions, stationOrder]);
 
   if (!event || !eventId) {
     return (
@@ -157,46 +150,73 @@ export default function EventJudgesScreen() {
   const ev = event;
   const eid = eventId;
 
-  async function handleAdd() {
+  async function ensureCloudEventId(): Promise<string | null> {
     let cloudEventId = ev.supabaseId;
-    if (!cloudEventId) {
-      setLoading(true);
-      try {
-        const sync = await pushEventToSupabase(eid);
-        if (!sync.ok) {
-          Alert.alert('Nuvem', sync.reason ?? 'Não foi possível sincronizar o evento.');
-          return;
-        }
-        cloudEventId = sync.data ?? useEventsStore.getState().events.find((e) => e.id === eid)?.supabaseId;
-        if (!cloudEventId) {
-          Alert.alert('Nuvem', 'Evento ainda não está na nuvem. Faça login e tente novamente.');
-          return;
-        }
-      } finally {
-        setLoading(false);
+    if (cloudEventId) return cloudEventId;
+
+    setLoading(true);
+    try {
+      const sync = await pushEventToSupabase(eid);
+      if (!sync.ok) {
+        Alert.alert('Nuvem', sync.reason ?? 'Não foi possível sincronizar o evento.');
+        return null;
       }
+      cloudEventId =
+        sync.data ?? useEventsStore.getState().events.find((e) => e.id === eid)?.supabaseId ?? null;
+      if (!cloudEventId) {
+        Alert.alert('Nuvem', 'Evento ainda não está na nuvem. Faça login e tente novamente.');
+        return null;
+      }
+      return cloudEventId;
+    } finally {
+      setLoading(false);
     }
-    if (!stationOrder && stationOptions.length > 0) {
-      Alert.alert('Estação', 'Selecione a estação em que o juiz atuará.');
-      return;
-    }
+  }
+
+  async function handleRegister(alsoAssignToEvent: boolean) {
     if (!fullName.trim()) {
       Alert.alert('Nome', 'Informe o nome do juiz.');
+      return;
+    }
+    if (!email.trim()) {
+      Alert.alert('E-mail', 'Informe o e-mail do juiz.');
       return;
     }
     if (!password.trim() || password.length < 6) {
       Alert.alert('Senha', 'Defina uma senha com pelo menos 6 caracteres.');
       return;
     }
+
+    const registeredName = fullName.trim();
     setLoading(true);
     try {
-      const result = await registerJudgeForEvent(
-        cloudEventId,
-        fullName,
-        email,
-        password,
-        stationOrder,
-      );
+      if (alsoAssignToEvent) {
+        const cloudEventId = await ensureCloudEventId();
+        if (!cloudEventId) return;
+
+        const result = await registerJudgeForEvent(
+          cloudEventId,
+          fullName,
+          email,
+          password,
+          null,
+        );
+        if (!result.ok) {
+          Alert.alert('Não foi possível', result.reason);
+          return;
+        }
+        setFullName('');
+        setEmail('');
+        setPassword('');
+        await loadStaff();
+        Alert.alert(
+          'Juiz cadastrado',
+          `${registeredName} foi adicionado a este evento. Defina a estação no card abaixo.`,
+        );
+        return;
+      }
+
+      const result = await registerOrganizerJudge(fullName, email, password);
       if (!result.ok) {
         Alert.alert('Não foi possível', result.reason);
         return;
@@ -205,29 +225,21 @@ export default function EventJudgesScreen() {
       setEmail('');
       setPassword('');
       await loadStaff();
-      if (result.data.createdAccount) {
-        if (result.data.loginReady) {
-          Alert.alert(
-            'Juiz cadastrado',
-            'O juiz já pode entrar no app com o e-mail e a senha definidos aqui.',
-          );
-        } else {
-          Alert.alert(
-            'Juiz cadastrado',
-            'Rode a migration 010 no Supabase (ou setup_completo.sql atualizado) e cadastre o juiz de novo para liberar o login imediato.',
-          );
-        }
-      } else {
-        Alert.alert(
-          'Juiz designado',
-          result.data.loginReady
-            ? 'Este e-mail já tinha conta de juiz — ele entra com a senha que já usa.'
-            : 'Este e-mail já tinha conta. O juiz usa a senha antiga dele (não a digitada agora).',
-        );
-      }
+      Alert.alert(
+        'Juiz cadastrado',
+        'O juiz já pode entrar no app. Depois, adicione-o a um evento e defina a estação.',
+      );
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleAdd() {
+    await handleRegister(true);
+  }
+
+  async function handleRegisterOnly() {
+    await handleRegister(false);
   }
 
   async function handleRemove(staffRowId: string) {
@@ -239,8 +251,11 @@ export default function EventJudgesScreen() {
     await loadStaff();
   }
 
-  async function handleChangeStation(member: EventStaffMember, order: number) {
-    const result = await updateEventStaffStation(member.id, order);
+  async function handleChangeStation(member: EventStaffMember, order: number | null) {
+    const result =
+      order == null
+        ? await clearEventStaffStation(member.id)
+        : await updateEventStaffStation(member.id, order);
     if (!result.ok) {
       Alert.alert('Erro', result.reason);
       return;
@@ -267,32 +282,12 @@ export default function EventJudgesScreen() {
   }
 
   async function handleAssignExisting(judge: OrganizerJudge) {
-    let cloudEventId = ev.supabaseId;
-    if (!cloudEventId) {
-      setLoading(true);
-      try {
-        const sync = await pushEventToSupabase(eid);
-        if (!sync.ok) {
-          Alert.alert('Nuvem', sync.reason ?? 'Não foi possível sincronizar o evento.');
-          return;
-        }
-        cloudEventId =
-          sync.data ?? useEventsStore.getState().events.find((e) => e.id === eid)?.supabaseId;
-        if (!cloudEventId) {
-          Alert.alert('Nuvem', 'Evento ainda não está na nuvem. Faça login e tente novamente.');
-          return;
-        }
-      } finally {
-        setLoading(false);
-      }
-    }
+    const cloudEventId = await ensureCloudEventId();
+    if (!cloudEventId) return;
+
     setLoading(true);
     try {
-      const result = await assignExistingJudgeToEvent(
-        cloudEventId,
-        judge.userId,
-        stationOrder,
-      );
+      const result = await assignExistingJudgeToEvent(cloudEventId, judge.userId, null);
       if (!result.ok) {
         Alert.alert('Não foi possível', result.reason);
         return;
@@ -300,9 +295,7 @@ export default function EventJudgesScreen() {
       await loadStaff();
       Alert.alert(
         'Juiz designado',
-        stationOrder
-          ? `${judge.fullName || judge.email} foi adicionado a este evento.`
-          : `${judge.fullName || judge.email} foi adicionado. Defina a estação no card abaixo.`,
+        `${judge.fullName || judge.email} foi adicionado a este evento. Defina a estação no card abaixo.`,
       );
     } finally {
       setLoading(false);
@@ -320,8 +313,8 @@ export default function EventJudgesScreen() {
       <Screen scroll>
         <Text style={styles.heading}>Cadastrar juízes</Text>
         <Text style={styles.subheading}>
-          O organizador cria a conta do juiz e define a estação (agora ou depois no card do juiz).
-          O juiz entra no app com o e-mail e a senha informados aqui.
+          Primeiro cadastre o juiz (conta de login). Depois adicione-o a este evento e defina a
+          estação no card — não precisa escolher estação antes.
         </Text>
 
         <Card
@@ -336,13 +329,6 @@ export default function EventJudgesScreen() {
 
         {loadError ? <Text style={styles.errorText}>{loadError}</Text> : null}
 
-        <StationPicker
-          segments={event.segments}
-          value={stationOrder}
-          onChange={setStationOrder}
-          label="Estação do juiz"
-        />
-
         {organizerJudges.length === 0 ? (
           <Card
             title="Juízes já cadastrados"
@@ -353,8 +339,8 @@ export default function EventJudgesScreen() {
           <>
             <Text style={styles.sectionTitle}>Juízes já cadastrados</Text>
             <Text style={styles.sectionHint}>
-              Juízes que você já cadastrou em outros eventos. Você pode adicionar agora e escolher a
-              estação depois no card do juiz, ou selecionar a estação acima antes de adicionar.
+              Juízes já cadastrados na sua conta. Toque em adicionar — a estação é definida depois
+              no card do juiz neste evento.
             </Text>
             {availableOrganizerJudges.length === 0 ? (
               <Card
@@ -405,7 +391,14 @@ export default function EventJudgesScreen() {
           secureTextEntry
         />
         <Button
-          label={loading ? 'Cadastrando…' : 'Cadastrar e designar juiz'}
+          label={loading ? 'Cadastrando…' : 'Cadastrar juiz'}
+          disabled={loading || !fullName.trim() || !email.trim() || password.length < 6}
+          onPress={handleRegisterOnly}
+          style={{ marginBottom: 8 }}
+        />
+        <Button
+          label={loading ? 'Cadastrando…' : 'Cadastrar e adicionar a este evento'}
+          variant="secondary"
           disabled={loading || !fullName.trim() || !email.trim() || password.length < 6}
           onPress={handleAdd}
           style={{ marginBottom: 20 }}
@@ -424,7 +417,9 @@ export default function EventJudgesScreen() {
               <StationPicker
                 segments={event.segments}
                 value={member.stationOrder}
-                onChange={(order) => handleChangeStation(member, order)}
+                onChange={(order) => void handleChangeStation(member, order)}
+                label="Estação neste evento"
+                allowUnset
               />
               <Button
                 label="Liberar login do juiz"
