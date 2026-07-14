@@ -38,6 +38,7 @@ export default function EventJudgesScreen() {
   const perms = useEventPermissions(event);
   const authUser = useAuthStore((s) => s.user);
   const supabaseOn = isSupabaseConfigured();
+  const resetSegmentsToHyrox = useEventsStore((s) => s.resetSegmentsToHyrox);
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -49,6 +50,12 @@ export default function EventJudgesScreen() {
     useEventStaffStore((s) => (eventId ? s.staffByEvent[eventId] : undefined)) ?? EMPTY_STAFF;
 
   const stationOptions = event ? stationSegmentOptions(event.segments) : [];
+
+  useEffect(() => {
+    if (!eventId || !event || !perms.canManageJudges) return;
+    if (stationSegmentOptions(event.segments).length > 0) return;
+    resetSegmentsToHyrox(eventId);
+  }, [event, eventId, perms.canManageJudges, resetSegmentsToHyrox]);
 
   const loadStaff = useCallback(async () => {
     if (!eventId) return;
@@ -169,7 +176,7 @@ export default function EventJudgesScreen() {
         setLoading(false);
       }
     }
-    if (!stationOrder) {
+    if (!stationOrder && stationOptions.length > 0) {
       Alert.alert('Estação', 'Selecione a estação em que o juiz atuará.');
       return;
     }
@@ -279,13 +286,13 @@ export default function EventJudgesScreen() {
         setLoading(false);
       }
     }
-    if (!stationOrder) {
-      Alert.alert('Estação', 'Selecione a estação antes de designar o juiz.');
-      return;
-    }
     setLoading(true);
     try {
-      const result = await assignExistingJudgeToEvent(cloudEventId, judge.userId, stationOrder);
+      const result = await assignExistingJudgeToEvent(
+        cloudEventId,
+        judge.userId,
+        stationOrder,
+      );
       if (!result.ok) {
         Alert.alert('Não foi possível', result.reason);
         return;
@@ -293,7 +300,9 @@ export default function EventJudgesScreen() {
       await loadStaff();
       Alert.alert(
         'Juiz designado',
-        `${judge.fullName || judge.email} foi adicionado a este evento.`,
+        stationOrder
+          ? `${judge.fullName || judge.email} foi adicionado a este evento.`
+          : `${judge.fullName || judge.email} foi adicionado. Defina a estação no card abaixo.`,
       );
     } finally {
       setLoading(false);
@@ -311,8 +320,8 @@ export default function EventJudgesScreen() {
       <Screen scroll>
         <Text style={styles.heading}>Cadastrar juízes</Text>
         <Text style={styles.subheading}>
-          O organizador cria a conta do juiz e define a estação. O juiz só precisa entrar no app
-          com o e-mail e a senha informados aqui.
+          O organizador cria a conta do juiz e define a estação (agora ou depois no card do juiz).
+          O juiz entra no app com o e-mail e a senha informados aqui.
         </Text>
 
         <Card
@@ -344,8 +353,8 @@ export default function EventJudgesScreen() {
           <>
             <Text style={styles.sectionTitle}>Juízes já cadastrados</Text>
             <Text style={styles.sectionHint}>
-              Juízes que você já cadastrou em outros eventos. Escolha a estação acima e toque em
-              adicionar.
+              Juízes que você já cadastrou em outros eventos. Você pode adicionar agora e escolher a
+              estação depois no card do juiz, ou selecionar a estação acima antes de adicionar.
             </Text>
             {availableOrganizerJudges.length === 0 ? (
               <Card
@@ -362,7 +371,7 @@ export default function EventJudgesScreen() {
                   <Button
                     label="Adicionar a este evento"
                     variant="secondary"
-                    disabled={loading || !stationOrder}
+                    disabled={loading}
                     onPress={() => handleAssignExisting(judge)}
                   />
                 </Card>
@@ -397,7 +406,7 @@ export default function EventJudgesScreen() {
         />
         <Button
           label={loading ? 'Cadastrando…' : 'Cadastrar e designar juiz'}
-          disabled={loading || !fullName.trim() || !email.trim() || password.length < 6 || !stationOrder}
+          disabled={loading || !fullName.trim() || !email.trim() || password.length < 6}
           onPress={handleAdd}
           style={{ marginBottom: 20 }}
         />

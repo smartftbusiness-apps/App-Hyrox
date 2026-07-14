@@ -17,6 +17,18 @@ export function StationPicker({ segments, value, onChange, label }: StationPicke
   const selectedText =
     value != null ? stationLabel(segments, value) : 'Selecionar estação';
 
+  if (options.length === 0) {
+    return (
+      <View style={styles.wrap}>
+        {label ? <Text style={styles.label}>{label}</Text> : null}
+        <Text style={styles.emptyHint}>
+          Nenhuma estação no percurso. O app carrega o padrão Hyrox automaticamente; se ainda
+          aparecer vazio, abra Estações do evento e toque em restaurar percurso Hyrox.
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.wrap}>
       {label ? <Text style={styles.label}>{label}</Text> : null}
@@ -68,6 +80,16 @@ export function StationPicker({ segments, value, onChange, label }: StationPicke
 
 const styles = StyleSheet.create({
   wrap: { marginBottom: 16 },
+  emptyHint: {
+    color: HyroxTheme.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: HyroxTheme.surface,
+    borderWidth: 1,
+    borderColor: HyroxTheme.border,
+  },
   label: { color: HyroxTheme.text, fontSize: 14, fontWeight: '600', marginBottom: 8 },
   trigger: {
     flexDirection: 'row',

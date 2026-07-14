@@ -79,11 +79,12 @@ export default function TimingScreen() {
   const wide = contentWidth >= 720;
   const events = useEvents();
   const markHeatStarted = useEventsStore((s) => s.markHeatStarted);
+  const updateEventStatus = useEventsStore((s) => s.updateEventStatus);
   const timingEvents = useMemo(
     () =>
       events.filter((e) => {
         if (!canControlEventTiming(e, isJudgeMode)) return false;
-        if (isJudgeMode) return e.status === 'live';
+        if (isJudgeMode) return e.status === 'live' || e.status === 'open';
         return e.status === 'live' || e.status === 'open';
       }),
     [events, isJudgeMode],
@@ -184,6 +185,9 @@ export default function TimingScreen() {
 
     const syncLive = async () => {
       if (isJudgeView) {
+        if (authUserId) {
+          await pullAndMergeJudgeEvents(authUserId);
+        }
         await syncJudgeEventLive(eventId);
 
         if (judgeStationOrder == null) return;
@@ -191,7 +195,7 @@ export default function TimingScreen() {
         const cloudRuns = await fetchJudgeStationCloudRuns(eventId, judgeStationOrder);
 
         setRuns((prev) => {
-          if (!cloudRuns.size) return {};
+          if (!cloudRuns.size) return prev;
           const next: Record<string, TimingRunState> = {};
           for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
             const local = prev[key];
@@ -256,6 +260,7 @@ export default function TimingScreen() {
     isJudgeView,
     judgeStationOrder,
     isJudgeMode,
+    authUserId,
   ]);
 
   function handleEventChange(id: string) {
@@ -319,7 +324,16 @@ export default function TimingScreen() {
 
   function startHeat(heatId: string) {
     if (!eventId || !selectedEvent || !isOrganizer) return;
-    const heat = (selectedEvent.heats ?? []).find((h) => h.id === heatId);
+    if (selectedEvent.status !== 'live') {
+      const statusResult = updateEventStatus(eventId, 'live');
+      if (!statusResult.ok) {
+        Alert.alert('Evento', statusResult.reason);
+        return;
+      }
+    }
+    const freshEvent =
+      useEventsStore.getState().events.find((e) => e.id === eventId) ?? selectedEvent;
+    const heat = (freshEvent.heats ?? []).find((h) => h.id === heatId);
     if (!heat) return;
     const mark = markHeatStarted(eventId, heatId);
     if (!mark.ok) {
@@ -614,7 +628,7 @@ export default function TimingScreen() {
         <Text style={styles.heading}>Cronômetro</Text>
         <Text style={styles.empty}>
           {isJudgeMode
-            ? 'Nenhum evento ao vivo no momento. Aguarde o organizador colocar o evento em "Ao vivo" e iniciar a bateria.'
+            ? 'Nenhum evento em andamento no momento. Aguarde o organizador iniciar a bateria (o evento pode estar em inscrições ou ao vivo).'
             : 'Nenhum evento com inscrições abertas ou ao vivo. Coloque o evento em "Ao vivo" ou "Inscrições" para cronometrar.'}
         </Text>
       </Screen>
