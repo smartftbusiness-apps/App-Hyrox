@@ -284,6 +284,12 @@ export function receiveAthleteAtStation(
 
   const runIdx = runIndexBeforeStation(segments, stationOrder);
 
+  if (run.segmentIndex === stationIdx && !isSegmentRunning(run)) {
+    return { ...run, segmentBaseMs: 0, segmentStartedAt: now };
+  }
+
+  if (run.segmentIndex > stationIdx) return null;
+
   if (runIdx != null && run.segmentIndex === runIdx) {
     const runSegment = segments[runIdx];
     const durationMs = getSegmentMs(run, now);
@@ -302,11 +308,12 @@ export function receiveAthleteAtStation(
     };
   }
 
-  if (run.segmentIndex === stationIdx && !isSegmentRunning(run)) {
-    return { ...run, segmentBaseMs: 0, segmentStartedAt: now };
-  }
-
-  return null;
+  return {
+    ...run,
+    segmentIndex: stationIdx,
+    segmentBaseMs: 0,
+    segmentStartedAt: now,
+  };
 }
 
 /**

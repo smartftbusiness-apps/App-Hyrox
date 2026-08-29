@@ -146,17 +146,26 @@ export function isJudgeManagingParticipant(
 
 }
 
-/** Atleta ainda não passou pela estação do juiz (inclui corrida inicial da bateria). */
+export function hasCompletedJudgeStation(
+  run: TimingRunState,
+  segments: Segment[],
+  stationOrder: number,
+): boolean {
+  const stationIdx = segmentIndexForOrder(segments, stationOrder);
+  if (stationIdx < 0) return false;
+  if (run.completed.includes(stationIdx)) return true;
+  if (run.raceComplete) return true;
+  return run.segmentIndex > stationIdx;
+}
+
+/** Atleta ainda não concluiu a estação do juiz — pode apontar o tempo ao chegar. */
 export function isParticipantVisibleToJudge(
   run: TimingRunState,
   segments: Segment[],
   stationOrder: number,
 ): boolean {
-  if (run.raceComplete) return false;
-  if (isJudgeManagingParticipant(run, segments, stationOrder)) return true;
-  const order = getCurrentSegmentOrder(run, segments);
-  if (order == null) return false;
-  return order <= stationOrder;
+  if (hasCompletedJudgeStation(run, segments, stationOrder)) return false;
+  return true;
 }
 
 
@@ -270,6 +279,7 @@ export function getJudgeStationActions(
   const atStation = isParticipantAtStation(run, segments, stationOrder);
 
   const running = isSegmentRunning(run);
+  const alreadyDone = hasCompletedJudgeStation(run, segments, stationOrder);
 
 
 
@@ -279,7 +289,7 @@ export function getJudgeStationActions(
 
     atStation,
 
-    canReceive: approaching || (atStation && !running),
+    canReceive: !alreadyDone && (!atStation || !running),
 
     canRelease: atStation && running,
 

@@ -332,17 +332,39 @@ export async function fetchMyJudgeAssignments(): Promise<JudgeAssignmentRow[]> {
   return data as JudgeAssignmentRow[];
 }
 
+function isMissingDatabaseObject(message: string): boolean {
+  const msg = message.toLowerCase();
+  return (
+    msg.includes('does not exist') ||
+    msg.includes('could not find the function') ||
+    msg.includes('schema cache') ||
+    msg.includes('could not find the table')
+  );
+}
+
 async function addJudgeToOrganizerRoster(userId: string): Promise<RepositoryResult<void>> {
   const { error } = await getSupabase().rpc('add_organizer_judge_to_roster', {
     p_user_id: userId,
   });
 
-  if (error) {
-    const msg = error.message.toLowerCase();
-    if (msg.includes('function') && msg.includes('does not exist')) {
-      return { ok: true, data: undefined };
-    }
+  if (!error) return { ok: true, data: undefined };
+
+  if (!isMissingDatabaseObject(error.message)) {
     return { ok: false, reason: error.message };
+  }
+
+  const {
+    data: { user },
+  } = await getSupabase().auth.getUser();
+  if (!user) return { ok: true, data: undefined };
+
+  const { error: insertError } = await getSupabase().from('organizer_judge_roster').upsert(
+    { organizer_id: user.id, user_id: userId },
+    { onConflict: 'organizer_id,user_id' },
+  );
+
+  if (insertError && !isMissingDatabaseObject(insertError.message)) {
+    return { ok: false, reason: insertError.message };
   }
 
   return { ok: true, data: undefined };
@@ -437,8 +459,7 @@ async function provisionJudgeAccount(
     };
   }
 
-  const roster = await addJudgeToOrganizerRoster(userId);
-  if (!roster.ok) return roster;
+  await addJudgeToOrganizerRoster(userId);
 
   return { ok: true, data: { userId, createdAccount, loginReady } };
 }
