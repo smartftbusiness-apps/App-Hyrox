@@ -604,27 +604,54 @@ export function subscribeEventLiveClock(
   if (!isSupabaseConfigured()) return () => {};
 
   const client = getSupabase();
-  const channel = client
-    .channel(`hyrox-live-${eventDbId}`)
-    .on(
+  const topicPrefix = `hyrox-live-${eventDbId}`;
+  const topic = `${topicPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let channel: ReturnType<typeof client.channel> | null = null;
+  let disposed = false;
+
+  const notify = () => {
+    if (!disposed) onChange();
+  };
+
+  try {
+    for (const existing of client.getChannels()) {
+      if (existing.topic.includes(topicPrefix)) {
+        void client.removeChannel(existing);
+      }
+    }
+
+    const next = client.channel(topic);
+    if (next.state === 'joined' || next.state === 'joining') {
+      return () => {
+        disposed = true;
+      };
+    }
+    next.on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'events', filter: `id=eq.${eventDbId}` },
-      () => onChange(),
-    )
-    .on(
+      notify,
+    );
+    next.on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'athlete_runs', filter: `event_id=eq.${eventDbId}` },
-      () => onChange(),
-    )
-    .on(
+      notify,
+    );
+    next.on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'pair_runs', filter: `event_id=eq.${eventDbId}` },
-      () => onChange(),
-    )
-    .subscribe();
+      notify,
+    );
+    next.subscribe();
+    channel = next;
+  } catch {
+    return () => {
+      disposed = true;
+    };
+  }
 
   return () => {
-    void client.removeChannel(channel);
+    disposed = true;
+    if (channel) void client.removeChannel(channel);
   };
 }
 

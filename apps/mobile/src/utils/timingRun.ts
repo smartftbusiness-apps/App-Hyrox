@@ -119,6 +119,24 @@ export function applySharedClockToRun(
   };
 }
 
+/** Aplica só pausa/retomada, sem mudar o start individual da prova. */
+export function applySharedPauseToRun(
+  run: TimingRunState,
+  clock: SharedRaceClock,
+): TimingRunState {
+  if (run.raceComplete) return run;
+  const totalPausedAt = clock.pausedAt ? new Date(clock.pausedAt).getTime() : null;
+  const totalPauseAccumMs = clock.pauseAccumMs ?? 0;
+  if (run.totalPausedAt === totalPausedAt && run.totalPauseAccumMs === totalPauseAccumMs) {
+    return run;
+  }
+  return {
+    ...run,
+    totalPausedAt,
+    totalPauseAccumMs,
+  };
+}
+
 export function getTotalMs(run: TimingRunState, now: number): number {
   if (run.raceComplete) return run.frozenTotalMs;
   const clockNow = run.totalPausedAt ?? now;
@@ -262,6 +280,7 @@ export function isCloudTimingAhead(
   localTouchedAtMs: number | undefined,
 ): boolean {
   if (!local) return true;
+  if (cloud.raceStartedAt > local.raceStartedAt + 1500) return true;
   if (localTouchedAtMs && cloudUpdatedAtMs < localTouchedAtMs - 500) return false;
   if (local.totalPausedAt != null && cloud.totalPausedAt == null) return false;
   if (local.totalPauseAccumMs > cloud.totalPauseAccumMs) return false;
@@ -314,6 +333,7 @@ export function advanceSegment(
       segmentStartedAt: null,
       raceComplete: true,
       frozenTotalMs: getTotalMs(run, now),
+      totalPausedAt: run.totalPausedAt ?? now,
     };
   }
 
@@ -409,6 +429,7 @@ export function releaseAthleteFromStation(
       segmentStartedAt: null,
       raceComplete: true,
       frozenTotalMs: getTotalMs(run, now),
+      totalPausedAt: run.totalPausedAt ?? now,
     };
   }
 

@@ -487,9 +487,6 @@ export const useEventsStore = create<EventsState>()(
         set((state) => ({
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
-            raceStartedAt: at,
-            racePausedAt: null,
-            racePauseAccumMs: 0,
             heats: (e.heats ?? []).map((h) =>
               h.id === heatId ? { ...h, startedAt: at } : h,
             ),

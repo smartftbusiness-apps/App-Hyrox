@@ -11,6 +11,7 @@ type StationMarksState = {
   markStation: (eventId: string, stationOrder: number, participantKey: string) => void;
   isMarked: (eventId: string, stationOrder: number, participantKey: string) => boolean;
   clearEvent: (eventId: string) => void;
+  clearParticipants: (eventId: string, participantKeys: string[]) => void;
 };
 
 export const useStationMarksStore = create<StationMarksState>()(
@@ -30,6 +31,18 @@ export const useStationMarksStore = create<StationMarksState>()(
           const next = { ...state.marked };
           for (const key of Object.keys(next)) {
             if (key.startsWith(prefix)) delete next[key];
+          }
+          return { marked: next };
+        });
+      },
+      clearParticipants: (eventId, participantKeys) => {
+        if (participantKeys.length === 0) return;
+        const suffixes = participantKeys.map((key) => `:${key}`);
+        set((state) => {
+          const next = { ...state.marked };
+          for (const key of Object.keys(next)) {
+            if (!key.startsWith(`${eventId}:`)) continue;
+            if (suffixes.some((suffix) => key.endsWith(suffix))) delete next[key];
           }
           return { marked: next };
         });

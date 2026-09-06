@@ -25,7 +25,6 @@ import { useOrganizerStore } from '@/src/stores/organizerStore';
 import {
   assignedParticipantsForHeat,
   buildTimingParticipants,
-  participantsForHeat,
   type TimingParticipant,
 } from '@/src/utils/participantHelpers';
 import { formatMs, formatStatusLabel } from '@/src/utils/formatTime';
@@ -56,7 +55,7 @@ import {
   alignRunToOrganizerClock,
   createHeatTimingRun,
   createJudgeStationWatchRun,
-  applySharedClockToRun,
+  applySharedPauseToRun,
   getSegmentMs,
   getTotalMs,
   isCloudTimingAhead,
@@ -127,6 +126,7 @@ export default function TimingScreen() {
   const localTouchedAtRef = useRef<Record<string, number>>({});
   const lastRaceStartByEventRef = useRef<Record<string, string>>({});
   const finishedFreezeRef = useRef<Record<string, string>>({});
+  const savedRankingKeysRef = useRef<Set<string>>(new Set());
   const timerPanelRef = useRef<View>(null);
 
   const setParticipantStatus = useAthletesStore((s) => s.setParticipantStatus);
@@ -163,6 +163,7 @@ export default function TimingScreen() {
   const markStationDone = useStationMarksStore((s) => s.markStation);
   const isStationMarked = useStationMarksStore((s) => s.isMarked);
   const clearEventStationMarks = useStationMarksStore((s) => s.clearEvent);
+  const clearParticipantStationMarks = useStationMarksStore((s) => s.clearParticipants);
   const athletes = useAthletesByEvent(eventId || undefined);
   const pairs = usePairsByEvent(eventId || undefined);
 
@@ -278,17 +279,18 @@ export default function TimingScreen() {
           const next = { ...prev };
           let changed = false;
           for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
+            if (cloudRun.participant.status === 'finished') continue;
             const local = prev[key];
             const cloudUpdatedAt = new Date(updatedAt).getTime();
             if (
               isCloudTimingAhead(local, cloudRun, cloudUpdatedAt, localTouchedAtRef.current[key])
             ) {
-              next[key] = applySharedClockToRun(cloudRun, liveClock);
+              next[key] = applySharedPauseToRun(cloudRun, liveClock);
               changed = true;
               continue;
             }
             if (local && local.raceStartedAt !== cloudRun.raceStartedAt) {
-              next[key] = applySharedClockToRun(
+              next[key] = applySharedPauseToRun(
                 alignRunToOrganizerClock(local, cloudRun),
                 liveClock,
               );
@@ -297,7 +299,7 @@ export default function TimingScreen() {
           }
           if (liveClock.startedAt) {
             for (const key of Object.keys(next)) {
-              const aligned = applySharedClockToRun(next[key], liveClock);
+              const aligned = applySharedPauseToRun(next[key], liveClock);
               if (aligned !== next[key]) {
                 next[key] = aligned;
                 changed = true;
@@ -324,7 +326,7 @@ export default function TimingScreen() {
             }
             if (next[key]) continue;
             if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
-            next[key] = applySharedClockToRun(
+            next[key] = applySharedPauseToRun(
               createJudgeStationWatchRun(participant, new Date(clockIso).getTime()),
               liveClock,
             );
@@ -360,6 +362,7 @@ export default function TimingScreen() {
         let next = { ...prev };
         let changed = false;
         for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
+          if (cloudRun.participant.status === 'finished') continue;
           const local = prev[key];
           const cloudUpdatedAt = new Date(updatedAt).getTime();
           if (
@@ -367,7 +370,7 @@ export default function TimingScreen() {
           ) {
             continue;
           }
-          next[key] = cloudRun;
+          next[key] = applySharedPauseToRun(cloudRun, raceClock);
           changed = true;
         }
         return changed ? next : prev;
@@ -395,15 +398,21 @@ export default function TimingScreen() {
 
   useEffect(() => {
     if (!pickedEventId || !selectedEvent?.supabaseId || !isSupabaseConfigured()) return;
-    return subscribeEventLiveClock(selectedEvent.supabaseId, () => {
-      setLiveTick((tick) => tick + 1);
-    });
+    try {
+      return subscribeEventLiveClock(selectedEvent.supabaseId, () => {
+        setLiveTick((tick) => tick + 1);
+      });
+    } catch {
+      return undefined;
+    }
   }, [pickedEventId, selectedEvent?.supabaseId]);
 
   useEffect(() => {
-    if (!eventId || !eventFinished || !raceClock.startedAt || raceClock.pausedAt) return;
-    const frozen = pauseRaceClock(raceClock);
-    setRaceClock(eventId, frozen);
+    if (!eventId || !eventFinished || !raceClock.startedAt) return;
+    const frozen = raceClock.pausedAt ? raceClock : pauseRaceClock(raceClock);
+    if (!raceClock.pausedAt) {
+      setRaceClock(eventId, frozen);
+    }
     applyClockToAllRuns(frozen);
   }, [eventId, eventFinished, raceClock.startedAt, raceClock.pausedAt]);
 
@@ -424,17 +433,8 @@ export default function TimingScreen() {
       const next = { ...prev };
       let changed = false;
       for (const key of Object.keys(next)) {
-        const run = next[key];
-        if (isJudgeView && run.raceStartedAt !== startedMs) {
-          next[key] = applySharedClockToRun(
-            createJudgeStationWatchRun(run.participant, startedMs),
-            raceClock,
-          );
-          changed = true;
-          continue;
-        }
-        const aligned = applySharedClockToRun(run, raceClock);
-        if (aligned !== run) {
+        const aligned = applySharedPauseToRun(next[key], raceClock);
+        if (aligned !== next[key]) {
           next[key] = aligned;
           changed = true;
         }
@@ -449,6 +449,7 @@ export default function TimingScreen() {
     setRuns({});
     setActiveKey(null);
     localTouchedAtRef.current = {};
+    savedRankingKeysRef.current = new Set();
   }
 
   function handleBackToEventList() {
@@ -457,6 +458,7 @@ export default function TimingScreen() {
     setRuns({});
     setActiveKey(null);
     localTouchedAtRef.current = {};
+    savedRankingKeysRef.current = new Set();
   }
 
   function touchRun(key: string) {
@@ -533,7 +535,7 @@ export default function TimingScreen() {
       const next = { ...prev };
       let changed = false;
       for (const key of Object.keys(next)) {
-        const aligned = applySharedClockToRun(next[key], clock);
+        const aligned = applySharedPauseToRun(next[key], clock);
         if (aligned !== next[key]) {
           next[key] = aligned;
           changed = true;
@@ -563,32 +565,39 @@ export default function TimingScreen() {
     }
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
-    const clock = startRaceClock(startedAt);
-    await persistRaceClock(clock);
-
-    let batch = participantsForHeat(participants, heat);
-    if (batch.length === 0) {
-      batch = participants.filter(
-        (p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns',
-      );
-    }
-
-    const nextRuns: Record<string, TimingRunState> = {};
-    for (const p of batch) {
-      const key = participantKey(p);
-      nextRuns[key] = createHeatTimingRun(p, startedAt, segments);
-      touchRun(key);
-    }
-    setRuns(nextRuns);
-    setActiveKey(batch[0] ? participantKey(batch[0]) : null);
-
+    const batch = assignedParticipantsForHeat(participants, heat).filter(
+      (p) => p.status !== 'dnf' && p.status !== 'dns',
+    );
     if (batch.length === 0) {
       Alert.alert(
         'Bateria',
-        'Bateria iniciada do zero. O tempo total já está visível para os juízes. Vincule atletas para registrar splits.',
+        'Nenhum atleta vinculado a esta bateria. Vincule os atletas em Baterias e tente de novo.',
       );
       return;
     }
+
+    const batchKeys = new Set(batch.map((p) => participantKey(p)));
+    const otherActive = Object.values(runs).some(
+      (run) => !run.raceComplete && !batchKeys.has(participantKey(run.participant)),
+    );
+    if (!selectedEvent.raceStartedAt || !otherActive) {
+      await persistRaceClock(startRaceClock(startedAt));
+    }
+    clearParticipantStationMarks(eventId, [...batchKeys]);
+    for (const key of batchKeys) {
+      savedRankingKeysRef.current.delete(key);
+    }
+
+    setRuns((prev) => {
+      const next = { ...prev };
+      for (const p of batch) {
+        const key = participantKey(p);
+        next[key] = createHeatTimingRun(p, startedAt, segments);
+        touchRun(key);
+      }
+      return next;
+    });
+    setActiveKey(participantKey(batch[0]));
 
     for (const p of batch) {
       const result = setParticipantStatus(eventId, p.id, p.type, 'racing');
@@ -638,7 +647,7 @@ export default function TimingScreen() {
         );
         return key;
       }
-      const newRun = applySharedClockToRun(
+      const newRun = applySharedPauseToRun(
         createJudgeStationWatchRun(participant, new Date(clockIso).getTime()),
         raceClock,
       );
@@ -760,22 +769,59 @@ export default function TimingScreen() {
     );
   }
 
-  function handleSaveFinish() {
-    if (!isOrganizer || !activeRun || !eventId || !activeKey) return;
-    const { participant } = activeRun;
+  function saveRunToRanking(run: TimingRunState, goToBoard: boolean) {
+    if (!isOrganizer || !eventId) return false;
+    const { participant } = run;
     const result = recordParticipantFinish(
       eventId,
       participant.id,
       participant.type,
-      getTotalMs(activeRun, now),
-      activeRun.segmentTimes,
+      run.frozenTotalMs || getTotalMs(run, now),
+      run.segmentTimes,
     );
     if (!result.ok) {
       Alert.alert('Não foi possível salvar', result.reason);
-      return;
+      return false;
     }
-    stopTracking(activeKey);
-    goToRanking(eventId, participant.categoryId);
+    const key = participantKey(participant);
+    stopTracking(key);
+    if (goToBoard) {
+      goToRanking(eventId, participant.categoryId);
+    }
+    return true;
+  }
+
+  function handleSaveFinish() {
+    if (!isOrganizer || !activeRun) return;
+    saveRunToRanking(activeRun, true);
+  }
+
+  useEffect(() => {
+    if (!isOrganizer || !eventId) return;
+    for (const run of Object.values(runs)) {
+      if (!run.raceComplete) continue;
+      const key = participantKey(run.participant);
+      if (savedRankingKeysRef.current.has(key)) continue;
+      if (run.participant.status === 'finished') {
+        savedRankingKeysRef.current.add(key);
+        continue;
+      }
+      savedRankingKeysRef.current.add(key);
+      if (!saveRunToRanking(run, false)) {
+        savedRankingKeysRef.current.delete(key);
+      }
+    }
+  }, [runs, isOrganizer, eventId]);
+
+  function runDisplayMs(run: TimingRunState): number {
+    if (run.raceComplete) return getTotalMs(run, now);
+    if (eventFinished) {
+      const frozenNow = displayClock.pausedAt
+        ? new Date(displayClock.pausedAt).getTime()
+        : now;
+      return getTotalMs(run, Number.isFinite(frozenNow) ? frozenNow : now);
+    }
+    return getTotalMs(run, now);
   }
 
   function renderJudgeWaitingTimer() {
@@ -832,7 +878,7 @@ export default function TimingScreen() {
       ? segments[activeRun.segmentIndex]
       : stationSegment ?? segments[activeRun.segmentIndex];
     const segmentMs = atJudgeStation || !isJudgeView ? getSegmentMs(activeRun, now) : 0;
-    const totalMs = getSharedRaceMs(displayClock, now) ?? getTotalMs(activeRun, now);
+    const totalMs = runDisplayMs(activeRun);
     const segmentRunning = isSegmentRunning(activeRun);
     const totalPaused = racePaused || isTotalTimePaused(activeRun);
 
@@ -1047,7 +1093,7 @@ export default function TimingScreen() {
           {runList.map((run) => {
             const key = participantKey(run.participant);
             const isActive = key === activeKey;
-            const liveTotal = getSharedRaceMs(displayClock, now) ?? getTotalMs(run, now);
+            const liveTotal = runDisplayMs(run);
             return (
               <Pressable
                 key={key}
@@ -1117,7 +1163,7 @@ export default function TimingScreen() {
                     hour: '2-digit',
                     minute: '2-digit',
                   })}
-                  {heat.startedAt || selectedEvent?.raceStartedAt ? ' · iniciada' : ''}
+                  {heat.startedAt ? ' · iniciada' : ''}
                   {' · '}
                   {assigned.length} atleta{assigned.length === 1 ? '' : 's'}
                 </Text>
