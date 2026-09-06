@@ -1,12 +1,13 @@
 import { useFonts } from 'expo-font';
 import { DarkTheme, ThemeProvider, Stack } from 'expo-router';
+import * as Linking from 'expo-linking';
 import * as SplashScreen from 'expo-splash-screen';
 import React, { useEffect } from 'react';
 import 'react-native-reanimated';
 import { HyroxTheme } from '@/constants/Theme';
-import { pullAndMergePublicEvents } from '@/src/api/syncService';
+import { handleAuthDeepLink } from '@/src/lib/authDeepLink';
 import { hydrateAuthStore } from '@/src/stores/authStore';
-import { useAccessModeStore } from '@/src/stores/accessModeStore';
+import { navigateToEventsHome } from '@/src/utils/navigation';
 import { useCloudStatusStore } from '@/src/stores/cloudStatusStore';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { hydrateAthletesStore, syncAthletesWithEvents } from '@/src/stores/athletesStore';
@@ -59,13 +60,26 @@ export default function RootLayout() {
         if (isSupabaseConfigured()) {
           await useCloudStatusStore.getState().checkCloud();
         }
-        if (useAccessModeStore.getState().isViewer()) {
-          await pullAndMergePublicEvents().catch(() => undefined);
-        }
       })
       .catch(() => {
         useEventsStore.getState().setHydrated(true);
       });
+  }, []);
+
+  useEffect(() => {
+    const handleUrl = (url: string) => {
+      void handleAuthDeepLink(url).then((handled) => {
+        if (!handled) return;
+        void hydrateAuthStore().then(() => navigateToEventsHome());
+      });
+    };
+
+    void Linking.getInitialURL().then((url) => {
+      if (url) handleUrl(url);
+    });
+
+    const subscription = Linking.addEventListener('url', ({ url }) => handleUrl(url));
+    return () => subscription.remove();
   }, []);
 
   if (!loaded) {
@@ -82,7 +96,7 @@ export default function RootLayout() {
           options={{
             headerStyle: { backgroundColor: HyroxTheme.surface },
             headerTintColor: HyroxTheme.text,
-            title: 'Conta organizador',
+            title: 'Conta',
           }}
         />
         <Stack.Screen

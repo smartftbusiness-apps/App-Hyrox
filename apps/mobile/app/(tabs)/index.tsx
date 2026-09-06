@@ -1,325 +1,545 @@
 import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+
+import { useEffect, useMemo, useState } from 'react';
+
 import { Alert, StyleSheet, Text, View } from 'react-native';
+
 import { Button } from '@/components/ui/Button';
+
 import { Card } from '@/components/ui/Card';
+
 import { Screen } from '@/components/ui/Screen';
+
 import { HyroxTheme } from '@/constants/Theme';
+
 import { APP_ROLE_LABELS } from '@/src/domain/appRole';
-import { pullAndMergeFromSupabase, pullAndMergePublicEvents } from '@/src/api/syncService';
-import { enterVisitorModeWithoutAccount } from '@/src/utils/visitorMode';
+
+import { pullAndMergeAthleteEvents, pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
+
 import { isSupabaseConfigured } from '@/src/lib/supabase';
-import { useAccessModeStore, useIsViewerMode } from '@/src/stores/accessModeStore';
+
+import { useAccessModeStore, useIsAthleteMode, useIsJudgeMode } from '@/src/stores/accessModeStore';
+
 import {
+
   CLOUD_STATUS_LABELS,
+
   useCloudStatusStore,
+
   type CloudStatus,
+
 } from '@/src/stores/cloudStatusStore';
+
 import { useAuthStore } from '@/src/stores/authStore';
+
 import { useAthletesStore } from '@/src/stores/athletesStore';
+
+import { useEventStaffStore } from '@/src/stores/eventStaffStore';
+
 import { useEvents } from '@/src/stores/eventsStore';
 
+import { translateSyncError } from '@/src/utils/authErrors';
+
+
+
 const STATUS_COLORS: Record<string, string> = {
+
   draft: HyroxTheme.textMuted,
+
   open: HyroxTheme.warning,
+
   live: HyroxTheme.success,
+
   finished: HyroxTheme.textMuted,
+
 };
+
+
 
 const STATUS_LABELS: Record<string, string> = {
+
   draft: 'Rascunho',
+
   open: 'Inscrições',
+
   live: 'Ao vivo',
+
   finished: 'Evento encerrado',
+
 };
+
+
 
 const CLOUD_BADGE: Record<CloudStatus, string> = {
+
   unknown: HyroxTheme.textMuted + '33',
+
   not_configured: HyroxTheme.warning + '33',
+
   online: HyroxTheme.success + '33',
+
   offline: HyroxTheme.danger + '33',
+
 };
 
+
+
 export default function EventsScreen() {
+
   const events = useEvents();
+
   const allAthletes = useAthletesStore((s) => s.athletes);
+
   const user = useAuthStore((s) => s.user);
-  const isViewer = useIsViewerMode();
+
+  const isJudge = useIsJudgeMode();
+  const isAthlete = useIsAthleteMode();
+
+  const assignedEventIds = useEventStaffStore((s) => s.assignedEventIds);
+
   const appRole = useAccessModeStore((s) => s.appRole);
+
   const cloudStatus = useCloudStatusStore((s) => s.status);
+
   const checkCloud = useCloudStatusStore((s) => s.checkCloud);
+
   const [syncing, setSyncing] = useState(false);
-  const [enteringVisitor, setEnteringVisitor] = useState(false);
+
   const supabaseOn = isSupabaseConfigured();
 
-  const displayedEvents = isViewer
-    ? events.filter((e) => e.status !== 'draft')
-    : events;
+
+
+  const participatingEventIds = useMemo(() => {
+    if (!isAthlete || !user?.email) return new Set<string>();
+    const email = user.email.toLowerCase();
+    return new Set(
+      allAthletes
+        .filter((a) => a.email?.toLowerCase() === email)
+        .map((a) => a.eventId),
+    );
+  }, [isAthlete, user?.email, allAthletes]);
+
+  const displayedEvents = useMemo(() => {
+    if (isJudge) {
+      return events.filter((e) => assignedEventIds.includes(e.id));
+    }
+    if (isAthlete) {
+      return events.filter((e) => participatingEventIds.has(e.id));
+    }
+    return events;
+  }, [events, isJudge, isAthlete, assignedEventIds, participatingEventIds]);
+
+
 
   const liveCount = displayedEvents.filter((e) => e.status === 'live').length;
+
   const totalAthletes = allAthletes.length;
 
+
+
   useEffect(() => {
-    if (supabaseOn) {
-      void checkCloud();
-    }
+
+    if (supabaseOn) void checkCloud();
+
   }, [supabaseOn, checkCloud]);
 
-  async function handleVisitorWithoutAccount() {
-    setEnteringVisitor(true);
-    try {
-      const result = await enterVisitorModeWithoutAccount();
-      if (!result.ok) {
-        Alert.alert('Visitante', result.reason);
-        return;
-      }
-      Alert.alert(
-        'Modo visitante',
-        result.eventCount
-          ? `${result.eventCount} evento(s) na nuvem.`
-          : 'Nenhum evento público no momento.',
-      );
-    } finally {
-      setEnteringVisitor(false);
-      if (supabaseOn) void checkCloud();
-    }
-  }
+
+
+  useEffect(() => {
+    if (!supabaseOn || !isAthlete || !user?.email) return;
+    void pullAndMergeAthleteEvents(user.email);
+  }, [supabaseOn, isAthlete, user?.email]);
+
+  useEffect(() => {
+    if (!supabaseOn || !isJudge || !user?.id) return;
+    void pullAndMergeJudgeEvents(user.id);
+  }, [supabaseOn, isJudge, user?.id]);
 
   async function handleRefreshOnline() {
+    if (!user?.id) {
+      router.push('/auth');
+      return;
+    }
+
     setSyncing(true);
     try {
-      if (isViewer) {
-        const result = await pullAndMergePublicEvents();
+      if (isAthlete) {
+        if (!user.email) {
+          Alert.alert('Conta', 'Sua conta precisa de e-mail para buscar suas provas.');
+          return;
+        }
+        const result = await pullAndMergeAthleteEvents(user.email);
         if (!result.ok) {
           Alert.alert('Nuvem', result.reason);
           return;
         }
-        Alert.alert(
-          'Atualizado',
-          result.eventCount
-            ? `${result.eventCount} evento(s) na nuvem.`
-            : 'Nenhum evento público no momento.',
-        );
+        Alert.alert('Atualizado', 'Suas provas foram carregadas.');
         return;
       }
 
-      if (!user?.id) {
-        router.push('/auth');
+      if (isJudge) {
+        const result = await pullAndMergeJudgeEvents(user.id);
+        if (!result.ok) {
+          Alert.alert('Nuvem', result.reason);
+          return;
+        }
+        Alert.alert('Atualizado', 'Eventos designados foram carregados.');
         return;
       }
+
       await pullAndMergeFromSupabase(user.id);
       Alert.alert('Atualizado', 'Seus eventos foram sincronizados.');
+    } catch (err) {
+      Alert.alert('Erro ao sincronizar', translateSyncError(err));
     } finally {
       setSyncing(false);
       if (supabaseOn) void checkCloud();
     }
   }
 
+
+
   return (
+
     <Screen scroll>
+
       <Text style={styles.heading}>
-        {isViewer ? 'Eventos — visitante' : 'Eventos'}
+
+        {isJudge ? 'Eventos — juiz' : isAthlete ? 'Minhas provas' : 'Eventos'}
+
       </Text>
+
       <Text style={styles.subheading}>
-        {isViewer
-          ? 'Veja provas ao vivo e rankings pela internet (somente leitura).'
-          : 'Gerencie competições Hyrox no celular — com ou sem nuvem.'}
+
+        {isJudge
+          ? 'Eventos em que você foi designado. Visualização + cronômetro.'
+          : isAthlete
+            ? 'Eventos em que você está inscrito. Veja seus resultados no ranking.'
+            : 'Gerencie competições Hyrox no celular — com ou sem nuvem.'}
+
       </Text>
+
+
 
       {supabaseOn && !user && (
-        <Card title="Só quer acompanhar?">
-          <Text style={styles.visitorCardText}>
-            Veja eventos ao vivo e ranking sem criar conta.
+
+        <Card title="Entre na sua conta">
+
+          <Text style={styles.loginCardText}>
+
+            Para sincronizar com a nuvem, crie uma conta ou faça login com e-mail e senha.
+
           </Text>
+
           <Button
-            label={enteringVisitor ? 'Carregando…' : 'Entrar como visitante sem conta'}
+
+            label="Entrar ou criar conta"
+
             variant="primary"
-            disabled={enteringVisitor || syncing}
-            onPress={handleVisitorWithoutAccount}
-            style={styles.visitorCardBtn}
+
+            onPress={() => router.push('/auth')}
+
+            style={styles.loginCardBtn}
+
           />
+
         </Card>
+
       )}
+
+
 
       <Card
-        title={`Perfil: ${APP_ROLE_LABELS[appRole]}`}
+
+        title={user ? `Perfil: ${APP_ROLE_LABELS[appRole]}` : 'Conta'}
+
         subtitle={
-          isViewer
-            ? 'Toque abaixo para buscar eventos na nuvem'
-            : user
-              ? `${user.email}`
-              : 'Organize localmente; use a nuvem quando estiver online'
+
+          user
+
+            ? isJudge
+              ? 'Busque eventos designados na nuvem'
+              : isAthlete
+                ? 'Busque suas provas na nuvem'
+                : user.email
+
+            : 'Faça login para usar a nuvem'
+
         }
+
         badge={supabaseOn ? CLOUD_STATUS_LABELS[cloudStatus] : 'Só no celular'}
+
         badgeColor={supabaseOn ? CLOUD_BADGE[cloudStatus] : HyroxTheme.textMuted + '33'}>
+
         <View style={styles.syncRow}>
-          {supabaseOn && (
+
+          {supabaseOn && user && (
+
             <Button
-              label={syncing ? 'Atualizando…' : isViewer ? 'Buscar na nuvem' : 'Sincronizar'}
+
+              label={syncing ? 'Atualizando…' : 'Sincronizar'}
+
               variant="secondary"
+
               disabled={syncing}
+
               onPress={handleRefreshOnline}
+
               style={styles.syncBtn}
+
             />
+
           )}
+
           <Button
-            label={isViewer ? 'Trocar perfil' : user ? 'Conta' : 'Nuvem / conta'}
+
+            label={user ? 'Minha conta' : 'Entrar / criar conta'}
+
             variant="secondary"
+
             onPress={() => router.push('/auth')}
+
             style={styles.syncBtn}
+
           />
+
           {user ? (
+
             <Button
+
               label="Sair"
+
               variant="secondary"
+
               onPress={() => useAuthStore.getState().signOut()}
+
               style={styles.syncBtn}
+
             />
+
           ) : null}
+
         </View>
-        {cloudStatus === 'offline' && supabaseOn ? (
-          <Text style={styles.cloudHint}>
-            A nuvem está fora do ar ou no limite do plano. Organizadores ainda podem usar o app no
-            celular; visitantes precisam esperar voltar.
-          </Text>
-        ) : null}
+
       </Card>
 
+
+
       <View style={styles.statsRow}>
+
         <View style={styles.stat}>
+
           <Text style={styles.statValue}>{displayedEvents.length}</Text>
+
           <Text style={styles.statLabel}>Eventos</Text>
+
         </View>
+
         <View style={styles.stat}>
+
           <Text style={styles.statValue}>{totalAthletes}</Text>
+
           <Text style={styles.statLabel}>Atletas</Text>
+
         </View>
+
         <View style={styles.stat}>
+
           <Text style={[styles.statValue, { color: HyroxTheme.success }]}>{liveCount}</Text>
+
           <Text style={styles.statLabel}>Ao vivo</Text>
+
         </View>
+
       </View>
 
+
+
       <Text style={styles.sectionTitle}>
-        {isViewer ? 'Eventos na nuvem' : 'Próximos e ativos'}
+
+        {isJudge ? 'Meus eventos' : 'Próximos e ativos'}
+
       </Text>
 
+
+
       {displayedEvents.length === 0 ? (
+
         <Card
+
           title="Nenhum evento aqui"
+
           subtitle={
-            isViewer
-              ? 'Toque em Buscar na nuvem quando a conexão estiver ok'
-              : 'Crie um evento ou sincronize com a nuvem'
+
+            isJudge
+
+              ? user
+
+                ? 'Peça ao organizador para te designar como juiz e sincronize.'
+
+                : 'Faça login como juiz.'
+
+              : user
+
+                ? 'Crie um evento ou sincronize com a nuvem'
+
+                : 'Crie eventos localmente ou faça login'
+
           }
+
         />
+
       ) : null}
 
+
+
       {displayedEvents.map((event) => (
+
         <Card
+
           key={event.id}
+
           title={event.name}
+
           subtitle={`${event.location} · ${new Date(event.date).toLocaleDateString('pt-BR')}`}
+
           badge={STATUS_LABELS[event.status]}
+
           badgeColor={STATUS_COLORS[event.status] + '33'}
+
           onPress={() => router.push(`/event/${event.id}`)}>
+
           <View style={styles.cardFooter}>
+
             <Text style={styles.footerText}>
+
               {allAthletes.filter((a) => a.eventId === event.id).length} atletas
+
             </Text>
+
             <Text style={styles.footerText}>{event.categories.length} categorias</Text>
+
           </View>
+
         </Card>
+
       ))}
 
-      {!isViewer && (
+
+
+      {!isJudge && !isAthlete && (
+
         <Card
+
           title="+ Novo evento"
+
           subtitle="Criar competição com template Hyrox (16 segmentos)"
+
           onPress={() => router.push('/event/new')}
+
         />
+
       )}
+
     </Screen>
+
   );
+
 }
 
+
+
 const styles = StyleSheet.create({
-  heading: {
-    color: HyroxTheme.text,
-    fontSize: 28,
-    fontWeight: '800',
-  },
+
+  heading: { color: HyroxTheme.text, fontSize: 26, fontWeight: '800' },
+
   subheading: {
+
     color: HyroxTheme.textMuted,
+
     fontSize: 15,
+
+    lineHeight: 22,
+
     marginTop: 4,
+
     marginBottom: 20,
+
   },
-  statsRow: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 24,
-  },
+
+  statsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 24 },
+
   stat: {
+
     flex: 1,
+
+    minWidth: 90,
+
     backgroundColor: HyroxTheme.surface,
+
     borderRadius: 12,
+
     borderWidth: 1,
+
     borderColor: HyroxTheme.border,
+
     padding: 14,
+
     alignItems: 'center',
+
   },
-  statValue: {
-    color: HyroxTheme.accent,
-    fontSize: 22,
-    fontWeight: '800',
-  },
-  statLabel: {
-    color: HyroxTheme.textMuted,
-    fontSize: 12,
-    marginTop: 4,
-  },
+
+  statValue: { color: HyroxTheme.accent, fontSize: 22, fontWeight: '800' },
+
+  statLabel: { color: HyroxTheme.textMuted, fontSize: 12, marginTop: 4, textAlign: 'center' },
+
   sectionTitle: {
+
     color: HyroxTheme.text,
+
     fontSize: 16,
+
     fontWeight: '700',
+
     marginBottom: 12,
+
   },
+
   cardFooter: {
+
     flexDirection: 'row',
+
     justifyContent: 'space-between',
+
     marginTop: 12,
+
     paddingTop: 12,
+
     borderTopWidth: 1,
+
     borderTopColor: HyroxTheme.border,
+
   },
-  footerText: {
+
+  footerText: { color: HyroxTheme.textMuted, fontSize: 13 },
+
+  syncRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 4 },
+
+  syncBtn: { flexGrow: 1, flexBasis: '45%', minWidth: 120 },
+
+  loginCardText: {
+
     color: HyroxTheme.textMuted,
-    fontSize: 13,
-  },
-  syncRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    marginTop: 4,
-  },
-  syncBtn: {
-    flexGrow: 1,
-    minWidth: '45%',
-  },
-  cloudHint: {
-    color: HyroxTheme.textMuted,
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 12,
-  },
-  visitorCardText: {
-    color: HyroxTheme.textMuted,
+
     fontSize: 14,
+
     lineHeight: 20,
+
     marginBottom: 12,
+
   },
-  visitorCardBtn: {
-    width: '100%',
-  },
+
+  loginCardBtn: { width: '100%' },
+
 });
+

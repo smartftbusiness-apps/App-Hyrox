@@ -6,6 +6,7 @@ import { MOCK_ATHLETES, MOCK_PAIRS } from '@/src/data/mockData';
 import { getSafeStorage } from '@/src/storage/safeStorage';
 import { scheduleEventSync } from '@/src/api/syncService';
 import { useEventsStore } from '@/src/stores/eventsStore';
+import { useEventStaffStore } from '@/src/stores/eventStaffStore';
 import { useOrganizerStore } from '@/src/stores/organizerStore';
 
 function syncEvent(eventId: string): void {
@@ -110,6 +111,11 @@ function assertEventAllowsTiming(eventId: string): ActionResult {
   if (event.status === 'finished') return { ok: false, reason: 'Evento encerrado' };
   if (event.status === 'draft') {
     return { ok: false, reason: 'Abra inscrições ou coloque o evento ao vivo para cronometrar' };
+  }
+  const owner = useOrganizerStore.getState().isEventOwner(event.organizerId);
+  const judge = useEventStaffStore.getState().isAssignedJudge(eventId);
+  if (!owner && !judge) {
+    return { ok: false, reason: 'Sem permissão para cronometrar este evento' };
   }
   return { ok: true };
 }

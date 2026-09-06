@@ -7,10 +7,12 @@ import { Input } from '@/components/ui/Input';
 import { Screen } from '@/components/ui/Screen';
 import { HyroxTheme } from '@/constants/Theme';
 import type { Division, Gender } from '@/src/domain/types';
-import { useEvent, useIsEventOwner } from '@/src/hooks/useEvent';
+import { useEvent } from '@/src/hooks/useEvent';
+import { useEventPermissions } from '@/src/hooks/useEventPermissions';
 import { useEventsStore } from '@/src/stores/eventsStore';
 import { EventNotFound } from '@/components/EventNotFound';
 import { buildCategoryName, genderLabel, getCategoryDisplayName } from '@/src/utils/categoryLabel';
+import { confirmAsync } from '@/src/utils/confirm';
 
 const DIVISIONS: { value: Division; label: string }[] = [
   { value: 'Open', label: 'Open' },
@@ -28,10 +30,10 @@ const GENDERS: { value: Gender; label: string }[] = [
 export default function CategoriesScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const event = useEvent(id);
-  const isOwner = useIsEventOwner(event);
+  const perms = useEventPermissions(event);
   const addCategory = useEventsStore((s) => s.addCategory);
   const removeCategory = useEventsStore((s) => s.removeCategory);
-  const canEdit = isOwner && event?.status !== 'finished';
+  const canEdit = perms.canEditStructure;
 
   const [division, setDivision] = useState<Division>('Open');
   const [gender, setGender] = useState<Gender>('M');
@@ -56,15 +58,18 @@ export default function CategoriesScreen() {
     setCustomName('');
   }
 
-  function handleRemove(categoryId: string, name: string) {
-    Alert.alert('Remover categoria', `Remover "${name}"?`, [
-      { text: 'Cancelar', style: 'cancel' },
-      {
-        text: 'Remover',
-        style: 'destructive',
-        onPress: () => removeCategory(eventId, categoryId),
-      },
-    ]);
+  async function handleRemove(categoryId: string, name: string) {
+    const confirmed = await confirmAsync(
+      'Remover categoria',
+      `Remover "${name}"?`,
+      'Remover',
+    );
+    if (!confirmed) return;
+
+    const result = removeCategory(eventId, categoryId);
+    if (!result.ok) {
+      Alert.alert('Não foi possível', result.reason);
+    }
   }
 
   const previewName = customName.trim() || buildCategoryName(division, gender);

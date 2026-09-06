@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { HyroxTheme } from '@/constants/Theme';
 import { formatMs } from '@/src/utils/formatTime';
 
@@ -19,6 +19,11 @@ export function TimerDisplay({
   segmentIndex,
   totalSegments,
 }: TimerDisplayProps) {
+  const { width } = useWindowDimensions();
+  const contentWidth = Math.min(width, 720);
+  const compact = contentWidth < 360;
+  const medium = contentWidth < 480;
+
   return (
     <View style={styles.container}>
       <View style={styles.meta}>
@@ -29,9 +34,22 @@ export function TimerDisplay({
           Segmento {segmentIndex}/{totalSegments}
         </Text>
       </View>
-      <Text style={styles.segmentName}>{segmentName}</Text>
-      <Text style={styles.target}>{segmentTarget}</Text>
-      <Text style={styles.timer}>{formatMs(elapsedMs)}</Text>
+      <Text
+        style={[styles.segmentName, compact && styles.segmentNameCompact]}
+        numberOfLines={2}
+        adjustsFontSizeToFit>
+        {segmentName}
+      </Text>
+      <Text style={[styles.target, compact && styles.targetCompact]} numberOfLines={2}>
+        {segmentTarget}
+      </Text>
+      <Text
+        style={[styles.timer, medium && styles.timerMedium, compact && styles.timerCompact]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.45}>
+        {formatMs(elapsedMs)}
+      </Text>
     </View>
   );
 }
@@ -39,13 +57,18 @@ export function TimerDisplay({
 const styles = StyleSheet.create({
   container: {
     alignItems: 'center',
-    paddingVertical: 24,
+    paddingVertical: 20,
+    paddingHorizontal: 12,
+    width: '100%',
+    maxWidth: '100%',
   },
   meta: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    marginBottom: 16,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+    justifyContent: 'center',
   },
   typeBadge: {
     paddingHorizontal: 10,
@@ -70,21 +93,37 @@ const styles = StyleSheet.create({
   },
   segmentName: {
     color: HyroxTheme.text,
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: '800',
     textAlign: 'center',
   },
+  segmentNameCompact: {
+    fontSize: 20,
+  },
   target: {
     color: HyroxTheme.textMuted,
-    fontSize: 16,
+    fontSize: 15,
     marginTop: 4,
-    marginBottom: 20,
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  targetCompact: {
+    fontSize: 13,
+    marginBottom: 12,
   },
   timer: {
     color: HyroxTheme.accent,
-    fontSize: 56,
+    fontSize: 52,
     fontWeight: '800',
     fontVariant: ['tabular-nums'],
     letterSpacing: -1,
+    maxWidth: '100%',
+    textAlign: 'center',
+  },
+  timerMedium: {
+    fontSize: 44,
+  },
+  timerCompact: {
+    fontSize: 36,
   },
 });

@@ -22,6 +22,22 @@ export interface Category {
   gender: Gender;
 }
 
+/** Bateria de largada — o start da bateria dispara o cronômetro dos participantes */
+export interface EventHeat {
+  id: string;
+  name: string;
+  /** Horário planejado (ISO) */
+  scheduledStartAt: string;
+  /** Quando o juiz iniciou a bateria / cronômetro */
+  startedAt?: string | null;
+  /** Categorias incluídas (vazio = todas) */
+  categoryIds: string[];
+  /** Bibs específicos (espelho dos participantes vinculados) */
+  bibNumbers: number[];
+  /** Chaves "athlete:id" ou "pair:id" dos participantes vinculados */
+  participantKeys: string[];
+}
+
 export interface HyroxEvent {
   id: string;
   /** UUID do registro em `events` no Supabase */
@@ -34,6 +50,9 @@ export interface HyroxEvent {
   athleteCount: number;
   categories: Category[];
   segments: Segment[];
+  heats?: EventHeat[];
+  /** ISO — start da bateria na nuvem (cronômetro total compartilhado) */
+  raceStartedAt?: string | null;
 }
 
 export interface Athlete {
@@ -46,6 +65,8 @@ export interface Athlete {
   categoryId: string;
   pairId?: string | null;
   status: AthleteStatus;
+  /** ISO — início da prova ao vivo (athlete_runs in_progress na nuvem) */
+  racingStartedAt?: string | null;
   totalMs: number | null;
   segmentTimes?: SegmentTime[];
 }
@@ -62,6 +83,8 @@ export interface DoublesPair {
   athlete2Id: string;
   teamName?: string;
   status: AthleteStatus;
+  /** ISO — início da prova ao vivo (pair_runs in_progress na nuvem) */
+  racingStartedAt?: string | null;
   totalMs: number | null;
   segmentTimes?: SegmentTime[];
 }
