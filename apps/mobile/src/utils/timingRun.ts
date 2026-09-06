@@ -68,6 +68,27 @@ export function createHeatTimingRun(
   };
 }
 
+/** Juiz só observa a prova: nenhum relógio corre até registrar chegada na estação. */
+export function createJudgeStationWatchRun(
+  participant: TimingParticipant,
+  raceStartedAt: number,
+): TimingRunState {
+  return {
+    participant,
+    segmentIndex: 0,
+    completed: [],
+    segmentTimes: [],
+    segmentBaseMs: 0,
+    segmentStartedAt: null,
+    raceStartedAt,
+    penaltiesMs: 0,
+    totalPauseAccumMs: 0,
+    totalPausedAt: null,
+    raceComplete: false,
+    frozenTotalMs: 0,
+  };
+}
+
 export function isTotalTimePaused(run: TimingRunState): boolean {
   return run.totalPausedAt != null && !run.raceComplete;
 }
