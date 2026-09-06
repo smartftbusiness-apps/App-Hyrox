@@ -35,6 +35,7 @@ import {
 } from '@/src/api/liveTimingRepository';
 import { pullAndMergeJudgeEvents, pushEventToSupabase, syncJudgeEventLive } from '@/src/api/syncService';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
+import { localIdFromDb } from '@/src/api/repositoryTypes';
 import { useIsJudgeMode } from '@/src/stores/accessModeStore';
 import { useAuthStore } from '@/src/stores/authStore';
 import { useIsEventOwner } from '@/src/hooks/useEvent';
@@ -61,11 +62,25 @@ import {
   stationLabel,
 } from '@/src/utils/stationTiming';
 
+function isJudgeAssignedToEvent(
+  event: HyroxEvent,
+  assignedEventIds: string[],
+  judgeStationByEvent: Record<string, number | null>,
+): boolean {
+  if (assignedEventIds.includes(event.id)) return true;
+  if (event.supabaseId) {
+    if (assignedEventIds.includes(event.supabaseId)) return true;
+    if (assignedEventIds.includes(localIdFromDb('evt', event.supabaseId))) return true;
+  }
+  return Object.prototype.hasOwnProperty.call(judgeStationByEvent, event.id);
+}
+
 export default function TimingScreen() {
   const { width } = useWindowDimensions();
   const isJudgeMode = useIsJudgeMode();
   const authUserId = useAuthStore((s) => s.user?.id);
   const assignedEventIds = useEventStaffStore((s) => s.assignedEventIds);
+  const judgeStations = useEventStaffStore((s) => s.judgeStationByEvent);
   const isEventOwner = useOrganizerStore((s) => s.isEventOwner);
   const contentWidth = Math.min(width, 720);
   const narrow = contentWidth < 380;
@@ -78,13 +93,13 @@ export default function TimingScreen() {
     () =>
       events.filter((e) => {
         if (isJudgeMode) {
-          if (!assignedEventIds.includes(e.id)) return false;
-          return e.status === 'live' || e.status === 'open';
+          if (!isJudgeAssignedToEvent(e, assignedEventIds, judgeStations)) return false;
+          return e.status !== 'finished';
         }
         if (!isEventOwner(e.organizerId)) return false;
         return e.status === 'live' || e.status === 'open';
       }),
-    [events, isJudgeMode, assignedEventIds, isEventOwner],
+    [events, isJudgeMode, assignedEventIds, judgeStations, isEventOwner],
   );
 
   const [pickedEventId, setPickedEventId] = useState<string | null>(null);
@@ -104,7 +119,10 @@ export default function TimingScreen() {
   const isAssignedJudge = useEventStaffStore((s) =>
     eventId ? s.isAssignedJudge(eventId) : false,
   );
-  const isJudgeView = isJudgeMode && isAssignedJudge;
+  const isJudgeView =
+    isJudgeMode &&
+    !!selectedEvent &&
+    (isAssignedJudge || isJudgeAssignedToEvent(selectedEvent, assignedEventIds, judgeStations));
   const judgeStationOrder = useEventStaffStore((s) =>
     eventId ? s.judgeStationByEvent[eventId] : undefined,
   );
@@ -206,7 +224,9 @@ export default function TimingScreen() {
             changed = true;
           }
           for (const participant of participants) {
-            if (participant.status !== 'racing') continue;
+            if (participant.status === 'finished' || participant.status === 'dnf' || participant.status === 'dns') {
+              continue;
+            }
             const key = participantKey(participant);
             if (next[key]) continue;
             const startedAt = participant.racingStartedAt
@@ -370,6 +390,19 @@ export default function TimingScreen() {
     node.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
   }
 
+  function ensureJudgeRun(participant: TimingParticipant): string {
+    const key = participantKey(participant);
+    if (!runs[key]) {
+      const startedAt = participant.racingStartedAt
+        ? new Date(participant.racingStartedAt).getTime()
+        : Date.now();
+      const newRun = createHeatTimingRun(participant, startedAt, segments);
+      setRuns((prev) => ({ ...prev, [key]: newRun }));
+    }
+    setActiveKey(key);
+    return key;
+  }
+
   function selectActive(key: string) {
     setActiveKey(key);
     const picked = runs[key] ?? runList.find((r) => participantKey(r.participant) === key);
@@ -480,6 +513,29 @@ export default function TimingScreen() {
     }
     stopTracking(activeKey);
     goToRanking(eventId, participant.categoryId);
+  }
+
+  function renderJudgeWaitingTimer() {
+    const station = judgeStationOrder != null
+      ? segments.find((s) => s.order === judgeStationOrder && s.type === 'station')
+      : undefined;
+    return (
+      <View style={styles.timerSection}>
+        <View style={styles.timerCard}>
+          <TimerDisplay
+            elapsedMs={0}
+            segmentName={station?.name ?? 'Sua estação'}
+            segmentTarget={station?.target ?? 'Aguardando atleta'}
+            segmentType="station"
+            segmentIndex={station?.order ?? 0}
+            totalSegments={segments.length || 1}
+          />
+          <Text style={styles.pausedHint}>
+            Toque no atleta abaixo quando ele chegar para iniciar o cronômetro.
+          </Text>
+        </View>
+      </View>
+    );
   }
 
   function renderActiveTimer() {
@@ -634,23 +690,16 @@ export default function TimingScreen() {
     );
   }
 
-  if (events.length === 0) {
-    return (
-      <Screen>
-        <Text style={styles.heading}>Cronômetro</Text>
-        <Text style={styles.empty}>Crie um evento para usar o cronômetro.</Text>
-      </Screen>
-    );
-  }
-
-  if (timingEvents.length === 0) {
+  if (events.length === 0 || timingEvents.length === 0) {
     return (
       <Screen>
         <Text style={styles.heading}>Cronômetro</Text>
         <Text style={styles.empty}>
           {isJudgeMode
-            ? 'Nenhum evento em andamento no momento. Aguarde o organizador iniciar a bateria (o evento pode estar em inscrições ou ao vivo).'
-            : 'Nenhum evento com inscrições abertas ou ao vivo. Coloque o evento em "Ao vivo" ou "Inscrições" para cronometrar.'}
+            ? 'Nenhum evento designado ainda. Peça ao organizador para te adicionar em Juízes e puxe para atualizar na aba Eventos.'
+            : events.length === 0
+              ? 'Crie um evento para usar o cronômetro.'
+              : 'Nenhum evento com inscrições abertas ou ao vivo. Coloque o evento em "Ao vivo" ou "Inscrições" para cronometrar.'}
         </Text>
       </Screen>
     );
@@ -712,7 +761,7 @@ export default function TimingScreen() {
         </View>
       )}
 
-      {!wide && activeRun && renderActiveTimer()}
+      {!wide && (activeRun ? renderActiveTimer() : isJudgeView ? renderJudgeWaitingTimer() : null)}
 
       {!activeRun && runList.length > 0 && (
         <Text style={styles.hint}>Selecione um participante na lista acima.</Text>
@@ -769,15 +818,46 @@ export default function TimingScreen() {
         </View>
       )}
 
-      {isJudgeView && judgeStationOrder != null && runList.length === 0 && (
+      {isJudgeView && (
         <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Atletas da estação</Text>
           <Text style={styles.hint}>
-            Estação: {stationLabel(segments, judgeStationOrder)}
+            Toque no atleta quando ele chegar. O cronômetro da estação aparece acima.
           </Text>
-          <Text style={styles.empty}>
-            Nenhum atleta em prova ainda. Assim que o organizador iniciar a bateria, eles
-            aparecem aqui para você apontar o tempo da estação.
-          </Text>
+          {participants.filter((p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns').length === 0 ? (
+            <Text style={styles.empty}>Nenhum atleta inscrito neste evento ainda.</Text>
+          ) : (
+            participants
+              .filter((p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns')
+              .map((p) => {
+                const key = participantKey(p);
+                const inRun = !!runs[key];
+                return (
+                  <Pressable
+                    key={key}
+                    style={[styles.participantRow, compact && styles.participantRowCompact]}
+                    onPress={() => ensureJudgeRun(p)}>
+                    <View style={styles.participantRowMain}>
+                      <Text style={[styles.participantBib, compact && styles.participantBibCompact]}>
+                        #{p.bib}
+                      </Text>
+                      <View style={styles.participantInfo}>
+                        <Text style={styles.participantName} numberOfLines={1}>
+                          {p.label}
+                        </Text>
+                        <Text style={styles.participantMeta} numberOfLines={2}>
+                          {p.type === 'pair' ? 'Dupla' : 'Individual'} · {p.categoryName}
+                          {inRun ? ' · pronto para cronometrar' : ''}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={[styles.startBtn, compact && styles.startBtnFull]}>
+                      <Text style={styles.startBtnText}>Selecionar</Text>
+                    </View>
+                  </Pressable>
+                );
+              })
+          )}
         </View>
       )}
 
@@ -861,7 +941,7 @@ export default function TimingScreen() {
             ))}
           </View>
 
-          {wide && renderActiveTimer()}
+          {wide && (activeRun ? renderActiveTimer() : isJudgeView ? renderJudgeWaitingTimer() : null)}
         </View>
 
         <View style={[styles.sideColumn, wide && styles.sideColumnWide]}>{sidebar}</View>

@@ -159,13 +159,75 @@ export async function fetchLiveTimingSnapshots(
 
 
 
-  if (error || !data?.length) return [];
+  const rows = !error && data?.length ? (data as LiveRunRow[]) : [];
 
-  return (data as LiveRunRow[])
+  if (rows.length) {
+    return rows.map(mapLiveRow).filter((row): row is LiveRunSnapshot => !!row);
+  }
 
-    .map(mapLiveRow)
+  const [athleteRes, pairRes] = await Promise.all([
+    getSupabase()
+      .from('athlete_runs')
+      .select(
+        'id, athlete_id, started_at, current_segment_order, current_segment_started_at, penalties_ms, live_complete_at, updated_at',
+      )
+      .eq('event_id', event.supabaseId)
+      .eq('status', 'in_progress'),
+    getSupabase()
+      .from('pair_runs')
+      .select(
+        'id, pair_id, started_at, current_segment_order, current_segment_started_at, penalties_ms, live_complete_at, updated_at',
+      )
+      .eq('event_id', event.supabaseId)
+      .eq('status', 'in_progress'),
+  ]);
 
-    .filter((row): row is LiveRunSnapshot => !!row);
+  const fallback: LiveRunRow[] = [
+    ...((athleteRes.data ?? []) as Array<{
+      id: string;
+      athlete_id: string;
+      started_at: string | null;
+      current_segment_order: number | null;
+      current_segment_started_at: string | null;
+      penalties_ms: number | null;
+      live_complete_at: string | null;
+      updated_at: string;
+    }>).map((row) => ({
+      participant_kind: 'athlete',
+      participant_id: row.athlete_id,
+      run_id: row.id,
+      started_at: row.started_at,
+      current_segment_order: row.current_segment_order,
+      current_segment_started_at: row.current_segment_started_at,
+      penalties_ms: row.penalties_ms,
+      live_complete_at: row.live_complete_at,
+      completed_segments: [],
+      updated_at: row.updated_at,
+    })),
+    ...((pairRes.data ?? []) as Array<{
+      id: string;
+      pair_id: string;
+      started_at: string | null;
+      current_segment_order: number | null;
+      current_segment_started_at: string | null;
+      penalties_ms: number | null;
+      live_complete_at: string | null;
+      updated_at: string;
+    }>).map((row) => ({
+      participant_kind: 'pair',
+      participant_id: row.pair_id,
+      run_id: row.id,
+      started_at: row.started_at,
+      current_segment_order: row.current_segment_order,
+      current_segment_started_at: row.current_segment_started_at,
+      penalties_ms: row.penalties_ms,
+      live_complete_at: row.live_complete_at,
+      completed_segments: [],
+      updated_at: row.updated_at,
+    })),
+  ];
+
+  return fallback.map(mapLiveRow).filter((row): row is LiveRunSnapshot => !!row);
 
 }
 

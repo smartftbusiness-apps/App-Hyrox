@@ -723,7 +723,9 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
     useEventsStore.setState({
       events: dedupeEvents([...merged, ...kept]),
     });
-    useEventStaffStore.getState().setAssignedEventIds([...mergedLocalIds]);
+    if (mergedLocalIds.size > 0) {
+      useEventStaffStore.getState().setAssignedEventIds([...mergedLocalIds]);
+    }
 
     const athleteState = useAthletesStore.getState();
     const { athletes, pairs } = applyMergedParticipants(
