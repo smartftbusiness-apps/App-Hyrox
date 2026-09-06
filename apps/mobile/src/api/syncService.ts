@@ -23,6 +23,7 @@ import { useEventsStore } from '@/src/stores/eventsStore';
 import { fetchAndApplyLiveRuns } from '@/src/api/liveTimingRepository';
 import { fetchMyJudgeAssignments } from '@/src/api/staffRepository';
 import { dedupeEvents } from '@/src/utils/dedupeEvents';
+import { stationSegmentOptions } from '@/src/utils/stationTiming';
 
 type DbEvent = {
   id: string;
@@ -649,6 +650,10 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
   const event = useEventsStore.getState().events.find((e) => e.id === localEventId);
   if (!event?.supabaseId || !isSupabaseConfigured()) return;
 
+  if (!event.segments?.length || stationSegmentOptions(event.segments).length === 0) {
+    useEventsStore.getState().resetSegmentsToHyrox(localEventId);
+  }
+
   const { data, error } = await getSupabase()
     .from('events')
     .select('id, organizer_id, name, event_date, location, status')
@@ -718,7 +723,9 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
     useEventsStore.setState({
       events: dedupeEvents([...merged, ...kept]),
     });
-    useEventStaffStore.getState().setAssignedEventIds([...mergedLocalIds]);
+    if (mergedLocalIds.size > 0) {
+      useEventStaffStore.getState().setAssignedEventIds([...mergedLocalIds]);
+    }
 
     const athleteState = useAthletesStore.getState();
     const { athletes, pairs } = applyMergedParticipants(
@@ -730,6 +737,12 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
     );
     useAthletesStore.setState({ athletes, pairs });
     await syncJudgeStationAssignments(merged);
+
+    for (const event of merged) {
+      if (!event.segments?.length || stationSegmentOptions(event.segments).length === 0) {
+        useEventsStore.getState().resetSegmentsToHyrox(event.id);
+      }
+    }
 
     return { ok: true };
   } catch (err) {

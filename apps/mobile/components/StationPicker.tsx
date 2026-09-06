@@ -7,15 +7,24 @@ import { stationLabel, stationSegmentOptions } from '@/src/utils/stationTiming';
 type StationPickerProps = {
   segments: Segment[];
   value: number | null;
-  onChange: (order: number) => void;
+  onChange: (order: number | null) => void;
   label?: string;
+  allowUnset?: boolean;
+  unsetLabel?: string;
 };
 
-export function StationPicker({ segments, value, onChange, label }: StationPickerProps) {
+export function StationPicker({
+  segments,
+  value,
+  onChange,
+  label,
+  allowUnset = false,
+  unsetLabel = 'Definir estação depois',
+}: StationPickerProps) {
   const [open, setOpen] = useState(false);
   const options = stationSegmentOptions(segments);
   const selectedText =
-    value != null ? stationLabel(segments, value) : 'Selecionar estação';
+    value != null ? stationLabel(segments, value) : unsetLabel;
 
   if (options.length === 0) {
     return (
@@ -47,6 +56,22 @@ export function StationPicker({ segments, value, onChange, label }: StationPicke
           <Pressable style={styles.sheet} onPress={() => {}}>
             <Text style={styles.sheetTitle}>Estação</Text>
             <ScrollView style={styles.list} keyboardShouldPersistTaps="handled">
+              {allowUnset && (
+                <Pressable
+                  style={[styles.option, value == null && styles.optionActive]}
+                  onPress={() => {
+                    onChange(null);
+                    setOpen(false);
+                  }}>
+                  <Text
+                    style={[
+                      styles.optionText,
+                      value == null && styles.optionTextActive,
+                    ]}>
+                    {unsetLabel}
+                  </Text>
+                </Pressable>
+              )}
               {options.map((seg) => (
                 <Pressable
                   key={seg.id}

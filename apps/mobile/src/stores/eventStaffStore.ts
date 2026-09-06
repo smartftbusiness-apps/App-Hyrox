@@ -77,8 +77,11 @@ export const useEventStaffStore = create<EventStaffState>()(
       getJudgeStation: (eventId) =>
         eventId ? get().judgeStationByEvent[eventId] : undefined,
 
-      isAssignedJudge: (eventId) =>
-        !!eventId && get().assignedEventIds.includes(eventId),
+      isAssignedJudge: (eventId) => {
+        if (!eventId) return false;
+        if (get().assignedEventIds.includes(eventId)) return true;
+        return Object.prototype.hasOwnProperty.call(get().judgeStationByEvent, eventId);
+      },
 
       clear: () =>
         set({ assignedEventIds: [], staffByEvent: {}, judgeStationByEvent: {} }),
