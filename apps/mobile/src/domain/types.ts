@@ -53,6 +53,10 @@ export interface HyroxEvent {
   heats?: EventHeat[];
   /** ISO — start da bateria na nuvem (cronômetro total compartilhado) */
   raceStartedAt?: string | null;
+  /** ISO — pausa do tempo total; null = correndo */
+  racePausedAt?: string | null;
+  /** Ms acumulados de pausas anteriores do tempo total */
+  racePauseAccumMs?: number;
 }
 
 export interface Athlete {

@@ -12,7 +12,7 @@ import { cloneHyroxSegments } from '@/src/domain/hyroxTemplate';
 import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
 import {
   ensureEventInSupabase,
-  fetchEventRaceStartedAt,
+  fetchEventRaceClock,
   updateEventStatusInSupabase,
 } from '@/src/api/eventsRepository';
 import type { RepositoryResult } from '@/src/api/repositoryTypes';
@@ -34,6 +34,8 @@ type DbEvent = {
   location: string;
   status: HyroxEvent['status'];
   race_started_at?: string | null;
+  race_paused_at?: string | null;
+  race_pause_accum_ms?: number | null;
 };
 
 type DbCategory = {
@@ -117,6 +119,9 @@ function mergeEventsLocalRemote(remote: HyroxEvent, existing: HyroxEvent): Hyrox
     date: remote.date,
     location: remote.location,
     raceStartedAt: remote.raceStartedAt ?? existing.raceStartedAt,
+    racePausedAt:
+      remote.racePausedAt !== undefined ? remote.racePausedAt : existing.racePausedAt,
+    racePauseAccumMs: remote.racePauseAccumMs ?? existing.racePauseAccumMs ?? 0,
   };
 }
 
@@ -308,23 +313,46 @@ async function hydrateRaceStartedAtOnEvents(events: HyroxEvent[]): Promise<void>
   const withDb = events.filter((event) => event.supabaseId);
   if (!withDb.length || !isSupabaseConfigured()) return;
 
-  const { data, error } = await getSupabase()
+  const full = await getSupabase()
     .from('events')
-    .select('id, race_started_at')
+    .select('id, race_started_at, race_paused_at, race_pause_accum_ms')
     .in(
       'id',
       withDb.map((event) => event.supabaseId!),
     );
-
-  if (error || !data) return;
+  const fallback = full.error
+    ? await getSupabase()
+        .from('events')
+        .select('id, race_started_at')
+        .in(
+          'id',
+          withDb.map((event) => event.supabaseId!),
+        )
+    : full;
+  if (fallback.error || !fallback.data) return;
 
   const byId = new Map(
-    data.map((row) => [row.id as string, (row.race_started_at as string | null) ?? null]),
+    fallback.data.map((row) => [
+      row.id as string,
+      {
+        raceStartedAt: (row.race_started_at as string | null) ?? null,
+        racePausedAt:
+          'race_paused_at' in row ? ((row.race_paused_at as string | null) ?? null) : null,
+        racePauseAccumMs:
+          'race_pause_accum_ms' in row ? Number(row.race_pause_accum_ms ?? 0) : 0,
+      },
+    ]),
   );
   useEventsStore.setState((state) => ({
     events: state.events.map((event) => {
       if (!event.supabaseId || !byId.has(event.supabaseId)) return event;
-      return { ...event, raceStartedAt: byId.get(event.supabaseId) ?? null };
+      const clock = byId.get(event.supabaseId)!;
+      return {
+        ...event,
+        raceStartedAt: clock.raceStartedAt,
+        racePausedAt: clock.racePausedAt,
+        racePauseAccumMs: clock.racePauseAccumMs,
+      };
     }),
   }));
 }
@@ -343,6 +371,8 @@ function mapDbEvent(row: DbEvent): HyroxEvent {
     categories: [],
     segments: cloneHyroxSegments(localId),
     raceStartedAt: row.race_started_at ?? null,
+    racePausedAt: row.race_paused_at ?? null,
+    racePauseAccumMs: Number(row.race_pause_accum_ms ?? 0),
   };
 }
 
@@ -685,23 +715,22 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
 
   const full = await getSupabase()
     .from('events')
-    .select('id, organizer_id, name, event_date, location, status, race_started_at')
+    .select(
+      'id, organizer_id, name, event_date, location, status, race_started_at, race_paused_at, race_pause_accum_ms',
+    )
     .eq('id', event.supabaseId)
     .maybeSingle();
   const fallback = full.error
     ? await getSupabase()
         .from('events')
-        .select('id, organizer_id, name, event_date, location, status')
+        .select('id, organizer_id, name, event_date, location, status, race_started_at')
         .eq('id', event.supabaseId)
         .maybeSingle()
     : full;
   const data = fallback.data;
   if (fallback.error || !data) return;
 
-  const raceStartedAt =
-    'race_started_at' in data
-      ? ((data.race_started_at as string | null | undefined) ?? null)
-      : await fetchEventRaceStartedAt(event.supabaseId);
+  const clock = await fetchEventRaceClock(event.supabaseId);
 
   useEventsStore.setState((state) => ({
     events: state.events.map((e) =>
@@ -712,7 +741,9 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
             date: data.event_date,
             location: data.location,
             status: data.status as HyroxEvent['status'],
-            raceStartedAt: raceStartedAt ?? e.raceStartedAt,
+            raceStartedAt: clock.startedAt ?? e.raceStartedAt,
+            racePausedAt: clock.pausedAt,
+            racePauseAccumMs: clock.pauseAccumMs,
           }
         : e,
     ),

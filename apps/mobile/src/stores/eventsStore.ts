@@ -88,6 +88,10 @@ type EventsState = {
   removeHeat: (eventId: string, heatId: string) => ActionResult;
   markHeatStarted: (eventId: string, heatId: string, startedAt?: string) => ActionResult;
   setRaceStartedAt: (eventId: string, startedAt: string | null) => void;
+  setRaceClock: (
+    eventId: string,
+    clock: { startedAt: string | null; pausedAt: string | null; pauseAccumMs: number },
+  ) => void;
   setHydrated: (value: boolean) => void;
 };
 
@@ -471,6 +475,8 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             raceStartedAt: at,
+            racePausedAt: null,
+            racePauseAccumMs: 0,
             heats: (e.heats ?? []).map((h) =>
               h.id === heatId ? { ...h, startedAt: at } : h,
             ),
@@ -483,6 +489,19 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             raceStartedAt: startedAt,
+            ...(startedAt
+              ? { racePausedAt: null, racePauseAccumMs: e.racePauseAccumMs ?? 0 }
+              : { racePausedAt: null, racePauseAccumMs: 0 }),
+          })),
+        }));
+      },
+      setRaceClock: (eventId, clock) => {
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            raceStartedAt: clock.startedAt,
+            racePausedAt: clock.pausedAt,
+            racePauseAccumMs: clock.pauseAccumMs,
           })),
         }));
       },
