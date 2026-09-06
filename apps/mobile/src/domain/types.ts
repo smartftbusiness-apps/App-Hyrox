@@ -51,6 +51,8 @@ export interface HyroxEvent {
   categories: Category[];
   segments: Segment[];
   heats?: EventHeat[];
+  /** ISO — start da bateria na nuvem (cronômetro total compartilhado) */
+  raceStartedAt?: string | null;
 }
 
 export interface Athlete {

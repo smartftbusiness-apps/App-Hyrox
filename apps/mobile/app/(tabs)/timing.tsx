@@ -32,7 +32,9 @@ import {
   fetchLiveTimingSnapshots,
   pushTimingRunState,
   startLiveRunInCloud,
+  subscribeEventLiveClock,
 } from '@/src/api/liveTimingRepository';
+import { setEventRaceStartedAtInSupabase } from '@/src/api/eventsRepository';
 import { pullAndMergeJudgeEvents, pushEventToSupabase, syncJudgeEventLive } from '@/src/api/syncService';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { localIdFromDb } from '@/src/api/repositoryTypes';
@@ -45,6 +47,7 @@ import {
   createHeatTimingRun,
   createJudgeStationWatchRun,
   getSegmentMs,
+  getSharedRaceMs,
   getTotalMs,
   isCloudTimingAhead,
   isSegmentRunning,
@@ -90,6 +93,7 @@ export default function TimingScreen() {
   const wide = contentWidth >= 720;
   const events = useEvents();
   const markHeatStarted = useEventsStore((s) => s.markHeatStarted);
+  const setRaceStartedAt = useEventsStore((s) => s.setRaceStartedAt);
   const updateEventStatus = useEventsStore((s) => s.updateEventStatus);
   const timingEvents = useMemo(
     () =>
@@ -109,6 +113,7 @@ export default function TimingScreen() {
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [runs, setRuns] = useState<Record<string, TimingRunState>>({});
   const [now, setNow] = useState(Date.now());
+  const [liveTick, setLiveTick] = useState(0);
   const localTouchedAtRef = useRef<Record<string, number>>({});
   const timerPanelRef = useRef<View>(null);
 
@@ -229,14 +234,28 @@ export default function TimingScreen() {
               changed = true;
             }
           }
+          const eventClockMs = selectedEvent.raceStartedAt
+            ? new Date(selectedEvent.raceStartedAt).getTime()
+            : null;
+          if (eventClockMs && Number.isFinite(eventClockMs)) {
+            for (const key of Object.keys(next)) {
+              if (next[key].raceStartedAt !== eventClockMs) {
+                next[key] = { ...next[key], raceStartedAt: eventClockMs };
+                changed = true;
+              }
+            }
+          }
           for (const participant of participants) {
-            if (participant.status !== 'racing' || !participant.racingStartedAt) continue;
+            const clockIso = participant.racingStartedAt ?? selectedEvent.raceStartedAt;
+            if (participant.status !== 'racing' && !clockIso) continue;
+            if (!clockIso) continue;
+            if (participant.status === 'finished' || participant.status === 'dnf' || participant.status === 'dns') {
+              continue;
+            }
             const key = participantKey(participant);
             if (next[key]) continue;
-            next[key] = createJudgeStationWatchRun(
-              participant,
-              new Date(participant.racingStartedAt).getTime(),
-            );
+            if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
+            next[key] = createJudgeStationWatchRun(participant, new Date(clockIso).getTime());
             changed = true;
           }
           if (!changed) return prev;
@@ -284,18 +303,27 @@ export default function TimingScreen() {
     };
 
     void syncLive();
-    const id = setInterval(() => void syncLive(), 2000);
+    const id = setInterval(() => void syncLive(), isJudgeView ? 750 : 2000);
     return () => clearInterval(id);
   }, [
     eventId,
     selectedEvent,
+    selectedEvent?.raceStartedAt,
     participants,
     segments,
     isJudgeView,
     judgeStationOrder,
     isJudgeMode,
     authUserId,
+    liveTick,
   ]);
+
+  useEffect(() => {
+    if (!selectedEvent?.supabaseId || !isSupabaseConfigured()) return;
+    return subscribeEventLiveClock(selectedEvent.supabaseId, () => {
+      setLiveTick((tick) => tick + 1);
+    });
+  }, [selectedEvent?.supabaseId]);
 
   function handleEventChange(id: string) {
     setPickedEventId(id);
@@ -347,6 +375,10 @@ export default function TimingScreen() {
     }
     if (selectedEvent) {
       try {
+        if (!selectedEvent.raceStartedAt) {
+          setRaceStartedAt(eventId, startedAtIso);
+          await setEventRaceStartedAtInSupabase(selectedEvent, startedAtIso);
+        }
         await pushEventToSupabase(eventId);
         const freshEvent = useEventsStore.getState().events.find((e) => e.id === eventId);
         await startLiveRunInCloud(freshEvent ?? selectedEvent, participant, startedAtIso);
@@ -356,7 +388,20 @@ export default function TimingScreen() {
     }
   }
 
-  function startHeat(heatId: string) {
+  async function persistRaceStart(startedAtIso: string) {
+    if (!eventId || !selectedEvent) return;
+    setRaceStartedAt(eventId, startedAtIso);
+    const event = useEventsStore.getState().events.find((e) => e.id === eventId) ?? selectedEvent;
+    const result = await setEventRaceStartedAtInSupabase(event, startedAtIso);
+    if (!result.ok) {
+      Alert.alert(
+        'Nuvem',
+        'O cronômetro local começou, mas os juízes só vão ver o tempo total depois de criar a coluna race_started_at no Supabase (migration 015).',
+      );
+    }
+  }
+
+  async function startHeat(heatId: string) {
     if (!eventId || !selectedEvent || !isOrganizer) return;
     if (selectedEvent.status !== 'live') {
       const statusResult = updateEventStatus(eventId, 'live');
@@ -374,18 +419,26 @@ export default function TimingScreen() {
       Alert.alert('Bateria', mark.reason);
       return;
     }
-    const batch = participantsForHeat(participants, heat);
+    const startedAt = Date.now();
+    const startedAtIso = new Date(startedAt).toISOString();
+    await persistRaceStart(startedAtIso);
+
+    let batch = participantsForHeat(participants, heat);
+    if (batch.length === 0) {
+      batch = participants.filter(
+        (p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns',
+      );
+    }
     if (batch.length === 0) {
       Alert.alert(
         'Bateria',
-        'Nenhum atleta vinculado a esta bateria. O organizador deve vincular atletas em Baterias.',
+        'Bateria iniciada. O tempo total já está visível para os juízes. Vincule atletas para registrar splits.',
       );
       return;
     }
-    const startedAt = Date.now();
-    batch.forEach((p) => {
-      void startParticipant(p, startedAt);
-    });
+    for (const p of batch) {
+      await startParticipant(p, startedAt);
+    }
   }
 
   function scrollToTimerPanel() {
@@ -397,17 +450,15 @@ export default function TimingScreen() {
   function ensureJudgeRun(participant: TimingParticipant): string {
     const key = participantKey(participant);
     if (!runs[key]) {
-      if (participant.status !== 'racing' || !participant.racingStartedAt) {
+      const clockIso = participant.racingStartedAt ?? selectedEvent?.raceStartedAt;
+      if (!clockIso) {
         Alert.alert(
           'Bateria',
           'Aguarde o organizador iniciar a bateria. O cronômetro total só aparece depois do start.',
         );
         return key;
       }
-      const newRun = createJudgeStationWatchRun(
-        participant,
-        new Date(participant.racingStartedAt).getTime(),
-      );
+      const newRun = createJudgeStationWatchRun(participant, new Date(clockIso).getTime());
       setRuns((prev) => ({ ...prev, [key]: newRun }));
     }
     setActiveKey(key);
@@ -531,8 +582,9 @@ export default function TimingScreen() {
       ? segments.find((s) => s.order === judgeStationOrder && s.type === 'station')
       : undefined;
     const clockRun = runList[0];
-    const heatStarted = !!clockRun;
-    const totalMs = clockRun ? getTotalMs(clockRun, now) : 0;
+    const sharedMs = getSharedRaceMs(selectedEvent?.raceStartedAt, now);
+    const heatStarted = !!clockRun || sharedMs != null;
+    const totalMs = clockRun ? getTotalMs(clockRun, now) : (sharedMs ?? 0);
     return (
       <View style={styles.timerSection}>
         <View style={styles.timerCard}>
@@ -546,11 +598,13 @@ export default function TimingScreen() {
           />
           <View style={styles.totalRow}>
             <Text style={styles.totalLabel}>Tempo total da prova</Text>
-            <Text style={styles.totalValue}>{heatStarted ? formatMs(totalMs) : '—'}</Text>
+            <Text style={[styles.totalValue, heatStarted && styles.totalValueLive]}>
+              {heatStarted ? formatMs(totalMs) : '—'}
+            </Text>
           </View>
-          <Text style={styles.pausedHint}>
+          <Text style={heatStarted ? styles.liveHint : styles.pausedHint}>
             {heatStarted
-              ? 'Bateria iniciada pelo organizador. Toque no atleta ao chegar na estação.'
+              ? 'Bateria em andamento. Toque no atleta ao chegar na estação.'
               : 'Aguardando o organizador iniciar a bateria.'}
           </Text>
         </View>
@@ -817,7 +871,7 @@ export default function TimingScreen() {
                     hour: '2-digit',
                     minute: '2-digit',
                   })}
-                  {heat.startedAt ? ' · iniciada' : ''}
+                  {heat.startedAt || selectedEvent?.raceStartedAt ? ' · iniciada' : ''}
                   {' · '}
                   {assigned.length} atleta{assigned.length === 1 ? '' : 's'}
                 </Text>
@@ -830,7 +884,7 @@ export default function TimingScreen() {
                   <Button
                     label={heat.startedAt ? 'Reiniciar bateria' : 'Iniciar bateria'}
                     variant="primary"
-                    onPress={() => startHeat(heat.id)}
+                    onPress={() => void startHeat(heat.id)}
                     style={{ marginTop: 10, width: '100%' }}
                   />
                 )}
@@ -1148,8 +1202,18 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontVariant: ['tabular-nums'],
   },
+  totalValueLive: {
+    color: HyroxTheme.accent,
+  },
   pausedHint: {
     color: HyroxTheme.warning,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    paddingBottom: 16,
+  },
+  liveHint: {
+    color: HyroxTheme.success,
     fontSize: 13,
     fontWeight: '600',
     textAlign: 'center',

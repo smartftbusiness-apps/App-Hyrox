@@ -12,6 +12,7 @@ import { cloneHyroxSegments } from '@/src/domain/hyroxTemplate';
 import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
 import {
   ensureEventInSupabase,
+  fetchEventRaceStartedAt,
   updateEventStatusInSupabase,
 } from '@/src/api/eventsRepository';
 import type { RepositoryResult } from '@/src/api/repositoryTypes';
@@ -32,6 +33,7 @@ type DbEvent = {
   event_date: string;
   location: string;
   status: HyroxEvent['status'];
+  race_started_at?: string | null;
 };
 
 type DbCategory = {
@@ -114,6 +116,7 @@ function mergeEventsLocalRemote(remote: HyroxEvent, existing: HyroxEvent): Hyrox
     name: remote.name,
     date: remote.date,
     location: remote.location,
+    raceStartedAt: remote.raceStartedAt ?? existing.raceStartedAt,
   };
 }
 
@@ -301,6 +304,31 @@ async function pushOrganizerPendingEvents(organizerId: string): Promise<void> {
   }
 }
 
+async function hydrateRaceStartedAtOnEvents(events: HyroxEvent[]): Promise<void> {
+  const withDb = events.filter((event) => event.supabaseId);
+  if (!withDb.length || !isSupabaseConfigured()) return;
+
+  const { data, error } = await getSupabase()
+    .from('events')
+    .select('id, race_started_at')
+    .in(
+      'id',
+      withDb.map((event) => event.supabaseId!),
+    );
+
+  if (error || !data) return;
+
+  const byId = new Map(
+    data.map((row) => [row.id as string, (row.race_started_at as string | null) ?? null]),
+  );
+  useEventsStore.setState((state) => ({
+    events: state.events.map((event) => {
+      if (!event.supabaseId || !byId.has(event.supabaseId)) return event;
+      return { ...event, raceStartedAt: byId.get(event.supabaseId) ?? null };
+    }),
+  }));
+}
+
 function mapDbEvent(row: DbEvent): HyroxEvent {
   const localId = localIdFromDb('evt', row.id);
   return {
@@ -314,6 +342,7 @@ function mapDbEvent(row: DbEvent): HyroxEvent {
     athleteCount: 0,
     categories: [],
     segments: cloneHyroxSegments(localId),
+    raceStartedAt: row.race_started_at ?? null,
   };
 }
 
@@ -654,13 +683,25 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
     useEventsStore.getState().resetSegmentsToHyrox(localEventId);
   }
 
-  const { data, error } = await getSupabase()
+  const full = await getSupabase()
     .from('events')
-    .select('id, organizer_id, name, event_date, location, status')
+    .select('id, organizer_id, name, event_date, location, status, race_started_at')
     .eq('id', event.supabaseId)
     .maybeSingle();
+  const fallback = full.error
+    ? await getSupabase()
+        .from('events')
+        .select('id, organizer_id, name, event_date, location, status')
+        .eq('id', event.supabaseId)
+        .maybeSingle()
+    : full;
+  const data = fallback.data;
+  if (fallback.error || !data) return;
 
-  if (error || !data) return;
+  const raceStartedAt =
+    'race_started_at' in data
+      ? ((data.race_started_at as string | null | undefined) ?? null)
+      : await fetchEventRaceStartedAt(event.supabaseId);
 
   useEventsStore.setState((state) => ({
     events: state.events.map((e) =>
@@ -671,6 +712,7 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
             date: data.event_date,
             location: data.location,
             status: data.status as HyroxEvent['status'],
+            raceStartedAt: raceStartedAt ?? e.raceStartedAt,
           }
         : e,
     ),
@@ -743,6 +785,8 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
         useEventsStore.getState().resetSegmentsToHyrox(event.id);
       }
     }
+
+    await hydrateRaceStartedAtOnEvents(merged);
 
     return { ok: true };
   } catch (err) {
@@ -842,6 +886,7 @@ export async function pullAndMergeFromSupabase(organizerId: string): Promise<voi
   });
 
   useEventsStore.setState({ events: dedupeEvents([...mergedRemote, ...localOnly]) });
+  await hydrateRaceStartedAtOnEvents(mergedRemote);
 
   const athleteState = useAthletesStore.getState();
   const { athletes, pairs } = applyMergedParticipants(

@@ -93,6 +93,14 @@ export function isTotalTimePaused(run: TimingRunState): boolean {
   return run.totalPausedAt != null && !run.raceComplete;
 }
 
+/** Tempo total da prova a partir do start compartilhado na nuvem (sem run local). */
+export function getSharedRaceMs(startedAtIso: string | null | undefined, now: number): number | null {
+  if (!startedAtIso) return null;
+  const startedAt = new Date(startedAtIso).getTime();
+  if (!Number.isFinite(startedAt)) return null;
+  return Math.max(0, now - startedAt);
+}
+
 export function getTotalMs(run: TimingRunState, now: number): number {
   if (run.raceComplete) return run.frozenTotalMs;
   const clockNow = run.totalPausedAt ?? now;

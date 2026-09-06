@@ -75,6 +75,36 @@ export async function finishEventInSupabase(event: HyroxEvent): Promise<Reposito
   return updateEventStatusInSupabase(event, 'finished');
 }
 
+/** Grava o start da bateria para juízes verem o tempo total em tempo real. */
+export async function setEventRaceStartedAtInSupabase(
+  event: HyroxEvent,
+  startedAtIso: string,
+): Promise<RepositoryResult<string>> {
+  if (!isSupabaseConfigured()) return { ok: true };
+
+  const ensured = await ensureEventInSupabase(event);
+  if (!ensured.ok) return ensured;
+
+  const { error } = await getSupabase()
+    .from('events')
+    .update({ race_started_at: startedAtIso, status: 'live' })
+    .eq('id', ensured.data!);
+
+  if (error) return { ok: false, reason: error.message };
+  return { ok: true, data: ensured.data! };
+}
+
+export async function fetchEventRaceStartedAt(eventDbId: string): Promise<string | null> {
+  if (!isSupabaseConfigured()) return null;
+  const { data, error } = await getSupabase()
+    .from('events')
+    .select('race_started_at')
+    .eq('id', eventDbId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return (data.race_started_at as string | null) ?? null;
+}
+
 export async function deleteEventInSupabase(event: HyroxEvent): Promise<RepositoryResult<void>> {
   if (!isSupabaseConfigured()) return { ok: true, data: undefined };
 

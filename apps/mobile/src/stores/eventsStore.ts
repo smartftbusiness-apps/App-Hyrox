@@ -87,6 +87,7 @@ type EventsState = {
   updateHeat: (eventId: string, heatId: string, input: UpdateHeatInput) => ActionResult;
   removeHeat: (eventId: string, heatId: string) => ActionResult;
   markHeatStarted: (eventId: string, heatId: string, startedAt?: string) => ActionResult;
+  setRaceStartedAt: (eventId: string, startedAt: string | null) => void;
   setHydrated: (value: boolean) => void;
 };
 
@@ -469,12 +470,21 @@ export const useEventsStore = create<EventsState>()(
         set((state) => ({
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
+            raceStartedAt: at,
             heats: (e.heats ?? []).map((h) =>
               h.id === heatId ? { ...h, startedAt: at } : h,
             ),
           })),
         }));
         return { ok: true };
+      },
+      setRaceStartedAt: (eventId, startedAt) => {
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            raceStartedAt: startedAt,
+          })),
+        }));
       },
     }),
     {

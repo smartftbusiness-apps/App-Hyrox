@@ -596,6 +596,38 @@ export async function pushTimingRunState(
 
 
 
+/** Assina o relógio da prova e as corridas ao vivo (Realtime). */
+export function subscribeEventLiveClock(
+  eventDbId: string,
+  onChange: () => void,
+): () => void {
+  if (!isSupabaseConfigured()) return () => {};
+
+  const client = getSupabase();
+  const channel = client
+    .channel(`hyrox-live-${eventDbId}`)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'events', filter: `id=eq.${eventDbId}` },
+      () => onChange(),
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'athlete_runs', filter: `event_id=eq.${eventDbId}` },
+      () => onChange(),
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'pair_runs', filter: `event_id=eq.${eventDbId}` },
+      () => onChange(),
+    )
+    .subscribe();
+
+  return () => {
+    void client.removeChannel(channel);
+  };
+}
+
 /** Registra início da prova na nuvem para outros juízes/organizadores verem. */
 
 export async function startLiveRunInCloud(
