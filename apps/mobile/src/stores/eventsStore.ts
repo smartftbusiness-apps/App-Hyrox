@@ -26,7 +26,9 @@ import {
   createEventInSupabase,
   deleteEventInSupabase,
   finishEventInSupabase,
+  persistEventRaceClock,
 } from '@/src/api/eventsRepository';
+import { clockFromEvent, pauseRaceClock } from '@/src/utils/raceClock';
 import { pushEventToSupabase, scheduleEventSync } from '@/src/api/syncService';
 import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
@@ -341,12 +343,23 @@ export const useEventsStore = create<EventsState>()(
           const blockReason = getFinishEventBlockReason(readiness);
           if (blockReason) return { ok: false, reason: blockReason };
 
+          const clock = clockFromEvent(event);
+          const frozenClock =
+            clock.startedAt && !clock.pausedAt ? pauseRaceClock(clock) : clock;
+
           set((state) => ({
             events: patchEvent(state.events, eventId, (e) => ({
               ...e,
               status: 'finished',
+              raceStartedAt: frozenClock.startedAt,
+              racePausedAt: frozenClock.pausedAt,
+              racePauseAccumMs: frozenClock.pauseAccumMs,
             })),
           }));
+
+          if (event && frozenClock.startedAt) {
+            void persistEventRaceClock({ ...event, status: 'finished' }, frozenClock);
+          }
 
           if (!isSupabaseConfigured()) return { ok: true };
 

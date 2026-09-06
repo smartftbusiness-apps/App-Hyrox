@@ -91,7 +91,6 @@ export async function persistEventRaceClock(
     race_started_at: clock.startedAt,
     race_paused_at: clock.pausedAt,
     race_pause_accum_ms: clock.pauseAccumMs,
-    status: 'live' as const,
   };
 
   const full = await getSupabase().from('events').update(payload).eq('id', ensured.data!);
@@ -99,7 +98,7 @@ export async function persistEventRaceClock(
 
   const { error } = await getSupabase()
     .from('events')
-    .update({ race_started_at: clock.startedAt, status: 'live' })
+    .update({ race_started_at: clock.startedAt })
     .eq('id', ensured.data!);
   if (error) return { ok: false, reason: error.message };
   if (clock.pausedAt || clock.pauseAccumMs > 0) {
