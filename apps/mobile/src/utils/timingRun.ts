@@ -1,5 +1,6 @@
 import type { Segment, SegmentTime } from '@/src/domain/types';
 import type { TimingParticipant } from '@/src/utils/participantHelpers';
+import type { SharedRaceClock } from '@/src/utils/raceClock';
 
 function runIndexBeforeStation(segments: Segment[], stationOrder: number): number | null {
   const stationIdx = segments.findIndex((s) => s.order === stationOrder && s.type === 'station');
@@ -93,12 +94,47 @@ export function isTotalTimePaused(run: TimingRunState): boolean {
   return run.totalPausedAt != null && !run.raceComplete;
 }
 
-/** Tempo total da prova a partir do start compartilhado na nuvem (sem run local). */
-export function getSharedRaceMs(startedAtIso: string | null | undefined, now: number): number | null {
-  if (!startedAtIso) return null;
-  const startedAt = new Date(startedAtIso).getTime();
-  if (!Number.isFinite(startedAt)) return null;
-  return Math.max(0, now - startedAt);
+/** Alinha um cronômetro local ao relógio compartilhado do organizador. */
+export function applySharedClockToRun(
+  run: TimingRunState,
+  clock: SharedRaceClock,
+): TimingRunState {
+  if (!clock.startedAt) return run;
+  const raceStartedAt = new Date(clock.startedAt).getTime();
+  if (!Number.isFinite(raceStartedAt)) return run;
+  const totalPausedAt = clock.pausedAt ? new Date(clock.pausedAt).getTime() : null;
+  const totalPauseAccumMs = clock.pauseAccumMs ?? 0;
+  if (
+    run.raceStartedAt === raceStartedAt &&
+    run.totalPausedAt === totalPausedAt &&
+    run.totalPauseAccumMs === totalPauseAccumMs
+  ) {
+    return run;
+  }
+  return {
+    ...run,
+    raceStartedAt,
+    totalPausedAt,
+    totalPauseAccumMs,
+  };
+}
+
+/** Aplica só pausa/retomada, sem mudar o start individual da prova. */
+export function applySharedPauseToRun(
+  run: TimingRunState,
+  clock: SharedRaceClock,
+): TimingRunState {
+  if (run.raceComplete) return run;
+  const totalPausedAt = clock.pausedAt ? new Date(clock.pausedAt).getTime() : null;
+  const totalPauseAccumMs = clock.pauseAccumMs ?? 0;
+  if (run.totalPausedAt === totalPausedAt && run.totalPauseAccumMs === totalPauseAccumMs) {
+    return run;
+  }
+  return {
+    ...run,
+    totalPausedAt,
+    totalPauseAccumMs,
+  };
 }
 
 export function getTotalMs(run: TimingRunState, now: number): number {
@@ -244,6 +280,7 @@ export function isCloudTimingAhead(
   localTouchedAtMs: number | undefined,
 ): boolean {
   if (!local) return true;
+  if (cloud.raceStartedAt > local.raceStartedAt + 1500) return true;
   if (localTouchedAtMs && cloudUpdatedAtMs < localTouchedAtMs - 500) return false;
   if (local.totalPausedAt != null && cloud.totalPausedAt == null) return false;
   if (local.totalPauseAccumMs > cloud.totalPauseAccumMs) return false;
@@ -265,6 +302,8 @@ export function alignRunToOrganizerClock(
   return {
     ...local,
     raceStartedAt: cloud.raceStartedAt,
+    totalPausedAt: cloud.totalPausedAt,
+    totalPauseAccumMs: cloud.totalPauseAccumMs,
     penaltiesMs: Math.max(local.penaltiesMs, cloud.penaltiesMs),
   };
 }
@@ -294,6 +333,7 @@ export function advanceSegment(
       segmentStartedAt: null,
       raceComplete: true,
       frozenTotalMs: getTotalMs(run, now),
+      totalPausedAt: run.totalPausedAt ?? now,
     };
   }
 
@@ -389,6 +429,7 @@ export function releaseAthleteFromStation(
       segmentStartedAt: null,
       raceComplete: true,
       frozenTotalMs: getTotalMs(run, now),
+      totalPausedAt: run.totalPausedAt ?? now,
     };
   }
 

@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { Button } from '@/components/ui/Button';
+import { Card } from '@/components/ui/Card';
 import { Screen } from '@/components/ui/Screen';
 import { SegmentProgress } from '@/components/SegmentProgress';
 import { TimerDisplay } from '@/components/TimerDisplay';
@@ -18,15 +19,15 @@ import { HyroxTheme } from '@/constants/Theme';
 import type { HyroxEvent } from '@/src/domain/types';
 import { useAthletesByEvent, useAthletesStore, usePairsByEvent } from '@/src/stores/athletesStore';
 import { useEventStaffStore } from '@/src/stores/eventStaffStore';
+import { useStationMarksStore } from '@/src/stores/stationMarksStore';
 import { useEvents, useEventsStore } from '@/src/stores/eventsStore';
 import { useOrganizerStore } from '@/src/stores/organizerStore';
 import {
   assignedParticipantsForHeat,
   buildTimingParticipants,
-  participantsForHeat,
   type TimingParticipant,
 } from '@/src/utils/participantHelpers';
-import { formatMs } from '@/src/utils/formatTime';
+import { formatMs, formatStatusLabel } from '@/src/utils/formatTime';
 import {
   buildRunsFromSnapshots,
   fetchLiveTimingSnapshots,
@@ -34,8 +35,16 @@ import {
   startLiveRunInCloud,
   subscribeEventLiveClock,
 } from '@/src/api/liveTimingRepository';
-import { setEventRaceStartedAtInSupabase } from '@/src/api/eventsRepository';
+import { persistEventRaceClock } from '@/src/api/eventsRepository';
 import { pullAndMergeJudgeEvents, pushEventToSupabase, syncJudgeEventLive } from '@/src/api/syncService';
+import {
+  clockFromEvent,
+  getSharedRaceMs,
+  isSharedRacePaused,
+  pauseRaceClock,
+  resumeRaceClock,
+  startRaceClock,
+} from '@/src/utils/raceClock';
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { localIdFromDb } from '@/src/api/repositoryTypes';
 import { useIsJudgeMode } from '@/src/stores/accessModeStore';
@@ -46,8 +55,8 @@ import {
   alignRunToOrganizerClock,
   createHeatTimingRun,
   createJudgeStationWatchRun,
+  applySharedPauseToRun,
   getSegmentMs,
-  getSharedRaceMs,
   getTotalMs,
   isCloudTimingAhead,
   isSegmentRunning,
@@ -56,13 +65,13 @@ import {
   receiveAthleteAtStation,
   releaseAthleteFromStation,
   toggleSegmentRun,
-  toggleTotalTimePause,
   type TimingRunState,
 } from '@/src/utils/timingRun';
 import {
   getJudgeStationActions,
   isParticipantApproachingStation,
   isParticipantAtStation,
+  hasCompletedJudgeStation,
   isParticipantVisibleToJudge,
   stationLabel,
 } from '@/src/utils/stationTiming';
@@ -93,14 +102,14 @@ export default function TimingScreen() {
   const wide = contentWidth >= 720;
   const events = useEvents();
   const markHeatStarted = useEventsStore((s) => s.markHeatStarted);
-  const setRaceStartedAt = useEventsStore((s) => s.setRaceStartedAt);
+  const setRaceClock = useEventsStore((s) => s.setRaceClock);
   const updateEventStatus = useEventsStore((s) => s.updateEventStatus);
   const timingEvents = useMemo(
     () =>
       events.filter((e) => {
         if (isJudgeMode) {
           if (!isJudgeAssignedToEvent(e, assignedEventIds, judgeStations)) return false;
-          return e.status !== 'finished';
+          return true;
         }
         if (!isEventOwner(e.organizerId)) return false;
         return e.status === 'live' || e.status === 'open';
@@ -115,13 +124,30 @@ export default function TimingScreen() {
   const [now, setNow] = useState(Date.now());
   const [liveTick, setLiveTick] = useState(0);
   const localTouchedAtRef = useRef<Record<string, number>>({});
+  const lastRaceStartByEventRef = useRef<Record<string, string>>({});
+  const finishedFreezeRef = useRef<Record<string, string>>({});
+  const savedRankingKeysRef = useRef<Set<string>>(new Set());
   const timerPanelRef = useRef<View>(null);
 
   const setParticipantStatus = useAthletesStore((s) => s.setParticipantStatus);
   const recordParticipantFinish = useAthletesStore((s) => s.recordParticipantFinish);
 
-  const eventId = pickedEventId ?? timingEvents[0]?.id ?? '';
-  const selectedEvent = timingEvents.find((e) => e.id === eventId);
+  const eventId = pickedEventId ?? '';
+  const selectedEvent = eventId
+    ? (events.find((e) => e.id === eventId) ?? timingEvents.find((e) => e.id === eventId))
+    : undefined;
+  const eventFinished = selectedEvent?.status === 'finished';
+  const raceClock = clockFromEvent(selectedEvent);
+  const displayClock =
+    eventFinished && raceClock.startedAt && !raceClock.pausedAt
+      ? {
+          ...raceClock,
+          pausedAt:
+            finishedFreezeRef.current[eventId] ??
+            (finishedFreezeRef.current[eventId] = new Date().toISOString()),
+        }
+      : raceClock;
+  const racePaused = isSharedRacePaused(displayClock) || eventFinished;
   const isOrganizer = !isJudgeMode && useIsEventOwner(selectedEvent);
   const isAssignedJudge = useEventStaffStore((s) =>
     eventId ? s.isAssignedJudge(eventId) : false,
@@ -133,6 +159,11 @@ export default function TimingScreen() {
   const judgeStationOrder = useEventStaffStore((s) =>
     eventId ? s.judgeStationByEvent[eventId] : undefined,
   );
+  const stationMarked = useStationMarksStore((s) => s.marked);
+  const markStationDone = useStationMarksStore((s) => s.markStation);
+  const isStationMarked = useStationMarksStore((s) => s.isMarked);
+  const clearEventStationMarks = useStationMarksStore((s) => s.clearEvent);
+  const clearParticipantStationMarks = useStationMarksStore((s) => s.clearParticipants);
   const athletes = useAthletesByEvent(eventId || undefined);
   const pairs = usePairsByEvent(eventId || undefined);
 
@@ -146,12 +177,41 @@ export default function TimingScreen() {
   const runList = useMemo(() => {
     let list = Object.values(runs);
     if (isJudgeView && judgeStationOrder != null) {
-      list = list.filter((run) =>
-        isParticipantVisibleToJudge(run, segments, judgeStationOrder),
-      );
+      list = list.filter((run) => {
+        const key = participantKey(run.participant);
+        if (isStationMarked(eventId, judgeStationOrder, key)) return false;
+        return isParticipantVisibleToJudge(run, segments, judgeStationOrder);
+      });
     }
     return list.sort((a, b) => a.participant.bib - b.participant.bib);
-  }, [runs, isJudgeView, judgeStationOrder, segments]);
+  }, [runs, isJudgeView, judgeStationOrder, segments, eventId, stationMarked, isStationMarked]);
+
+  const judgeRosterParticipants = useMemo(() => {
+    return participants.filter((p) => {
+      if (p.status === 'finished' || p.status === 'dnf' || p.status === 'dns') return false;
+      const key = participantKey(p);
+      if (judgeStationOrder != null && isStationMarked(eventId, judgeStationOrder, key)) {
+        return false;
+      }
+      const run = runs[key];
+      if (
+        run &&
+        judgeStationOrder != null &&
+        hasCompletedJudgeStation(run, segments, judgeStationOrder)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [
+    participants,
+    runs,
+    judgeStationOrder,
+    eventId,
+    segments,
+    stationMarked,
+    isStationMarked,
+  ]);
 
   const activeRun = useMemo(
     () =>
@@ -197,19 +257,18 @@ export default function TimingScreen() {
   }, [isJudgeMode, authUserId]);
 
   useEffect(() => {
-    if (!isJudgeView || !eventId || !selectedEvent?.supabaseId) return;
+    if (!pickedEventId || !isJudgeView || !eventId || !selectedEvent?.supabaseId) return;
     void syncJudgeEventLive(eventId);
-  }, [isJudgeView, eventId, selectedEvent?.supabaseId]);
+  }, [pickedEventId, isJudgeView, eventId, selectedEvent?.supabaseId]);
 
   useEffect(() => {
-    if (!eventId || !isSupabaseConfigured() || !selectedEvent) return;
+    if (!pickedEventId || !eventId || !isSupabaseConfigured() || !selectedEvent) return;
 
     const syncLive = async () => {
       if (isJudgeView) {
-        if (authUserId) {
-          await pullAndMergeJudgeEvents(authUserId);
-        }
         await syncJudgeEventLive(eventId);
+        const liveEvent = useEventsStore.getState().events.find((e) => e.id === eventId);
+        const liveClock = clockFromEvent(liveEvent);
 
         const snapshots = await fetchLiveTimingSnapshots(eventId);
         const cloudRuns = snapshots.length
@@ -220,42 +279,57 @@ export default function TimingScreen() {
           const next = { ...prev };
           let changed = false;
           for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
+            if (cloudRun.participant.status === 'finished') continue;
             const local = prev[key];
             const cloudUpdatedAt = new Date(updatedAt).getTime();
             if (
               isCloudTimingAhead(local, cloudRun, cloudUpdatedAt, localTouchedAtRef.current[key])
             ) {
-              next[key] = cloudRun;
+              next[key] = applySharedPauseToRun(cloudRun, liveClock);
               changed = true;
               continue;
             }
             if (local && local.raceStartedAt !== cloudRun.raceStartedAt) {
-              next[key] = alignRunToOrganizerClock(local, cloudRun);
+              next[key] = applySharedPauseToRun(
+                alignRunToOrganizerClock(local, cloudRun),
+                liveClock,
+              );
               changed = true;
             }
           }
-          const eventClockMs = selectedEvent.raceStartedAt
-            ? new Date(selectedEvent.raceStartedAt).getTime()
-            : null;
-          if (eventClockMs && Number.isFinite(eventClockMs)) {
+          if (liveClock.startedAt) {
             for (const key of Object.keys(next)) {
-              if (next[key].raceStartedAt !== eventClockMs) {
-                next[key] = { ...next[key], raceStartedAt: eventClockMs };
+              const aligned = applySharedPauseToRun(next[key], liveClock);
+              if (aligned !== next[key]) {
+                next[key] = aligned;
                 changed = true;
               }
             }
           }
           for (const participant of participants) {
-            const clockIso = participant.racingStartedAt ?? selectedEvent.raceStartedAt;
+            const clockIso = participant.racingStartedAt ?? liveClock.startedAt;
             if (participant.status !== 'racing' && !clockIso) continue;
             if (!clockIso) continue;
             if (participant.status === 'finished' || participant.status === 'dnf' || participant.status === 'dns') {
               continue;
             }
             const key = participantKey(participant);
+            if (
+              judgeStationOrder != null &&
+              isStationMarked(eventId, judgeStationOrder, key)
+            ) {
+              if (next[key]) {
+                delete next[key];
+                changed = true;
+              }
+              continue;
+            }
             if (next[key]) continue;
             if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
-            next[key] = createJudgeStationWatchRun(participant, new Date(clockIso).getTime());
+            next[key] = applySharedPauseToRun(
+              createJudgeStationWatchRun(participant, new Date(clockIso).getTime()),
+              liveClock,
+            );
             changed = true;
           }
           if (!changed) return prev;
@@ -288,6 +362,7 @@ export default function TimingScreen() {
         let next = { ...prev };
         let changed = false;
         for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
+          if (cloudRun.participant.status === 'finished') continue;
           const local = prev[key];
           const cloudUpdatedAt = new Date(updatedAt).getTime();
           if (
@@ -295,7 +370,7 @@ export default function TimingScreen() {
           ) {
             continue;
           }
-          next[key] = cloudRun;
+          next[key] = applySharedPauseToRun(cloudRun, raceClock);
           changed = true;
         }
         return changed ? next : prev;
@@ -309,21 +384,64 @@ export default function TimingScreen() {
     eventId,
     selectedEvent,
     selectedEvent?.raceStartedAt,
+    selectedEvent?.racePausedAt,
+    selectedEvent?.racePauseAccumMs,
     participants,
     segments,
     isJudgeView,
     judgeStationOrder,
+    pickedEventId,
     isJudgeMode,
-    authUserId,
+    stationMarked,
     liveTick,
   ]);
 
   useEffect(() => {
-    if (!selectedEvent?.supabaseId || !isSupabaseConfigured()) return;
-    return subscribeEventLiveClock(selectedEvent.supabaseId, () => {
-      setLiveTick((tick) => tick + 1);
+    if (!pickedEventId || !selectedEvent?.supabaseId || !isSupabaseConfigured()) return;
+    try {
+      return subscribeEventLiveClock(selectedEvent.supabaseId, () => {
+        setLiveTick((tick) => tick + 1);
+      });
+    } catch {
+      return undefined;
+    }
+  }, [pickedEventId, selectedEvent?.supabaseId]);
+
+  useEffect(() => {
+    if (!eventId || !eventFinished || !raceClock.startedAt) return;
+    const frozen = raceClock.pausedAt ? raceClock : pauseRaceClock(raceClock);
+    if (!raceClock.pausedAt) {
+      setRaceClock(eventId, frozen);
+    }
+    applyClockToAllRuns(frozen);
+  }, [eventId, eventFinished, raceClock.startedAt, raceClock.pausedAt]);
+
+  useEffect(() => {
+    if (!eventId || !raceClock.startedAt) return;
+    const previous = lastRaceStartByEventRef.current[eventId];
+    if (previous && previous !== raceClock.startedAt) {
+      clearEventStationMarks(eventId);
+    }
+    lastRaceStartByEventRef.current[eventId] = raceClock.startedAt;
+  }, [eventId, raceClock.startedAt, clearEventStationMarks]);
+
+  useEffect(() => {
+    if (!raceClock.startedAt) return;
+    const startedMs = new Date(raceClock.startedAt).getTime();
+    if (!Number.isFinite(startedMs)) return;
+    setRuns((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const key of Object.keys(next)) {
+        const aligned = applySharedPauseToRun(next[key], raceClock);
+        if (aligned !== next[key]) {
+          next[key] = aligned;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
     });
-  }, [selectedEvent?.supabaseId]);
+  }, [raceClock.startedAt, raceClock.pausedAt, raceClock.pauseAccumMs, isJudgeView]);
 
   function handleEventChange(id: string) {
     setPickedEventId(id);
@@ -331,6 +449,16 @@ export default function TimingScreen() {
     setRuns({});
     setActiveKey(null);
     localTouchedAtRef.current = {};
+    savedRankingKeysRef.current = new Set();
+  }
+
+  function handleBackToEventList() {
+    setPickedEventId(null);
+    setSearch('');
+    setRuns({});
+    setActiveKey(null);
+    localTouchedAtRef.current = {};
+    savedRankingKeysRef.current = new Set();
   }
 
   function touchRun(key: string) {
@@ -376,8 +504,9 @@ export default function TimingScreen() {
     if (selectedEvent) {
       try {
         if (!selectedEvent.raceStartedAt) {
-          setRaceStartedAt(eventId, startedAtIso);
-          await setEventRaceStartedAtInSupabase(selectedEvent, startedAtIso);
+          const clock = startRaceClock(startedAt);
+          setRaceClock(eventId, clock);
+          await persistEventRaceClock(selectedEvent, clock);
         }
         await pushEventToSupabase(eventId);
         const freshEvent = useEventsStore.getState().events.find((e) => e.id === eventId);
@@ -388,17 +517,32 @@ export default function TimingScreen() {
     }
   }
 
-  async function persistRaceStart(startedAtIso: string) {
+  async function persistRaceClock(clock: ReturnType<typeof startRaceClock>) {
     if (!eventId || !selectedEvent) return;
-    setRaceStartedAt(eventId, startedAtIso);
+    setRaceClock(eventId, clock);
     const event = useEventsStore.getState().events.find((e) => e.id === eventId) ?? selectedEvent;
-    const result = await setEventRaceStartedAtInSupabase(event, startedAtIso);
+    const result = await persistEventRaceClock(event, clock);
     if (!result.ok) {
       Alert.alert(
         'Nuvem',
-        'O cronômetro local começou, mas os juízes só vão ver o tempo total depois de criar a coluna race_started_at no Supabase (migration 015).',
+        'O cronômetro local atualizou, mas os juízes só sincronizam depois de criar as colunas race_paused_at e race_pause_accum_ms no Supabase (migration 016).',
       );
     }
+  }
+
+  function applyClockToAllRuns(clock: ReturnType<typeof startRaceClock>) {
+    setRuns((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const key of Object.keys(next)) {
+        const aligned = applySharedPauseToRun(next[key], clock);
+        if (aligned !== next[key]) {
+          next[key] = aligned;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
   }
 
   async function startHeat(heatId: string) {
@@ -421,23 +565,53 @@ export default function TimingScreen() {
     }
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
-    await persistRaceStart(startedAtIso);
-
-    let batch = participantsForHeat(participants, heat);
-    if (batch.length === 0) {
-      batch = participants.filter(
-        (p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns',
-      );
-    }
+    const batch = assignedParticipantsForHeat(participants, heat).filter(
+      (p) => p.status !== 'dnf' && p.status !== 'dns',
+    );
     if (batch.length === 0) {
       Alert.alert(
         'Bateria',
-        'Bateria iniciada. O tempo total já está visível para os juízes. Vincule atletas para registrar splits.',
+        'Nenhum atleta vinculado a esta bateria. Vincule os atletas em Baterias e tente de novo.',
       );
       return;
     }
+
+    const batchKeys = new Set(batch.map((p) => participantKey(p)));
+    const otherActive = Object.values(runs).some(
+      (run) => !run.raceComplete && !batchKeys.has(participantKey(run.participant)),
+    );
+    if (!selectedEvent.raceStartedAt || !otherActive) {
+      await persistRaceClock(startRaceClock(startedAt));
+    }
+    clearParticipantStationMarks(eventId, [...batchKeys]);
+    for (const key of batchKeys) {
+      savedRankingKeysRef.current.delete(key);
+    }
+
+    setRuns((prev) => {
+      const next = { ...prev };
+      for (const p of batch) {
+        const key = participantKey(p);
+        next[key] = createHeatTimingRun(p, startedAt, segments);
+        touchRun(key);
+      }
+      return next;
+    });
+    setActiveKey(participantKey(batch[0]));
+
     for (const p of batch) {
-      await startParticipant(p, startedAt);
+      const result = setParticipantStatus(eventId, p.id, p.type, 'racing');
+      if (!result.ok) {
+        Alert.alert('Cronômetro', result.reason);
+        continue;
+      }
+      try {
+        await pushEventToSupabase(eventId);
+        const event = useEventsStore.getState().events.find((e) => e.id === eventId) ?? selectedEvent;
+        await startLiveRunInCloud(event, p, startedAtIso);
+      } catch {
+        // mantém cronômetro local
+      }
     }
   }
 
@@ -449,8 +623,16 @@ export default function TimingScreen() {
 
   function ensureJudgeRun(participant: TimingParticipant): string {
     const key = participantKey(participant);
+    if (eventFinished) return key;
+    if (
+      judgeStationOrder != null &&
+      (isStationMarked(eventId, judgeStationOrder, key) ||
+        (runs[key] && hasCompletedJudgeStation(runs[key], segments, judgeStationOrder)))
+    ) {
+      return key;
+    }
     if (!runs[key]) {
-      const clockIso = participant.racingStartedAt ?? selectedEvent?.raceStartedAt;
+      const clockIso = participant.racingStartedAt ?? raceClock.startedAt;
       if (!clockIso) {
         Alert.alert(
           'Bateria',
@@ -458,7 +640,17 @@ export default function TimingScreen() {
         );
         return key;
       }
-      const newRun = createJudgeStationWatchRun(participant, new Date(clockIso).getTime());
+      if (racePaused) {
+        Alert.alert(
+          'Prova pausada',
+          'O organizador pausou o tempo total. Aguarde a retomada para apontar a estação.',
+        );
+        return key;
+      }
+      const newRun = applySharedPauseToRun(
+        createJudgeStationWatchRun(participant, new Date(clockIso).getTime()),
+        raceClock,
+      );
       setRuns((prev) => ({ ...prev, [key]: newRun }));
     }
     setActiveKey(key);
@@ -506,6 +698,7 @@ export default function TimingScreen() {
         judgeStationOrder != null &&
         !isParticipantVisibleToJudge(nextRun, segments, judgeStationOrder)
       ) {
+        markStationDone(eventId, judgeStationOrder, key);
         delete next[key];
         const remaining = Object.keys(next);
         setActiveKey(remaining[0] ?? null);
@@ -517,6 +710,13 @@ export default function TimingScreen() {
 
   function handleReceiveAtStation() {
     if (!activeKey || !activeRun || !isJudgeView || judgeStationOrder == null) return;
+    if (racePaused) {
+      Alert.alert(
+        'Prova pausada',
+        'O organizador pausou o tempo total. Aguarde a retomada para apontar a estação.',
+      );
+      return;
+    }
     const nextRun = receiveAthleteAtStation(activeRun, segments, judgeStationOrder, now);
     if (!nextRun) return;
     applyRunUpdate(activeKey, nextRun);
@@ -524,11 +724,19 @@ export default function TimingScreen() {
 
   function handleReleaseFromStation() {
     if (!activeKey || !activeRun || !isJudgeView || judgeStationOrder == null) return;
+    if (racePaused) {
+      Alert.alert(
+        'Prova pausada',
+        'O organizador pausou o tempo total. Aguarde a retomada para encerrar a estação.',
+      );
+      return;
+    }
     const segment = segments[activeRun.segmentIndex];
     if (!segment || segment.type !== 'station') return;
     const segMs = getSegmentMs(activeRun, now);
     if (segMs === 0 && !isSegmentRunning(activeRun)) return;
     const nextRun = releaseAthleteFromStation(activeRun, segment.id, segments, now);
+    markStationDone(eventId, judgeStationOrder, activeKey);
     applyRunUpdate(activeKey, nextRun);
   }
 
@@ -548,9 +756,11 @@ export default function TimingScreen() {
   }
 
   function handleToggleTotalPause() {
-    if (!isOrganizer || !activeKey || !activeRun || activeRun.raceComplete) return;
-    const nextRun = toggleTotalTimePause(activeRun, now);
-    applyRunUpdate(activeKey, nextRun);
+    if (!isOrganizer || eventFinished || !raceClock.startedAt) return;
+    const nextClock = racePaused ? resumeRaceClock(raceClock, now) : pauseRaceClock(raceClock, now);
+    setRaceClock(eventId, nextClock);
+    applyClockToAllRuns(nextClock);
+    void persistRaceClock(nextClock);
   }
 
   function goToRanking(savedEventId: string, savedCategoryId: string) {
@@ -559,22 +769,59 @@ export default function TimingScreen() {
     );
   }
 
-  function handleSaveFinish() {
-    if (!isOrganizer || !activeRun || !eventId || !activeKey) return;
-    const { participant } = activeRun;
+  function saveRunToRanking(run: TimingRunState, goToBoard: boolean) {
+    if (!isOrganizer || !eventId) return false;
+    const { participant } = run;
     const result = recordParticipantFinish(
       eventId,
       participant.id,
       participant.type,
-      getTotalMs(activeRun, now),
-      activeRun.segmentTimes,
+      run.frozenTotalMs || getTotalMs(run, now),
+      run.segmentTimes,
     );
     if (!result.ok) {
       Alert.alert('Não foi possível salvar', result.reason);
-      return;
+      return false;
     }
-    stopTracking(activeKey);
-    goToRanking(eventId, participant.categoryId);
+    const key = participantKey(participant);
+    stopTracking(key);
+    if (goToBoard) {
+      goToRanking(eventId, participant.categoryId);
+    }
+    return true;
+  }
+
+  function handleSaveFinish() {
+    if (!isOrganizer || !activeRun) return;
+    saveRunToRanking(activeRun, true);
+  }
+
+  useEffect(() => {
+    if (!isOrganizer || !eventId) return;
+    for (const run of Object.values(runs)) {
+      if (!run.raceComplete) continue;
+      const key = participantKey(run.participant);
+      if (savedRankingKeysRef.current.has(key)) continue;
+      if (run.participant.status === 'finished') {
+        savedRankingKeysRef.current.add(key);
+        continue;
+      }
+      savedRankingKeysRef.current.add(key);
+      if (!saveRunToRanking(run, false)) {
+        savedRankingKeysRef.current.delete(key);
+      }
+    }
+  }, [runs, isOrganizer, eventId]);
+
+  function runDisplayMs(run: TimingRunState): number {
+    if (run.raceComplete) return getTotalMs(run, now);
+    if (eventFinished) {
+      const frozenNow = displayClock.pausedAt
+        ? new Date(displayClock.pausedAt).getTime()
+        : now;
+      return getTotalMs(run, Number.isFinite(frozenNow) ? frozenNow : now);
+    }
+    return getTotalMs(run, now);
   }
 
   function renderJudgeWaitingTimer() {
@@ -582,9 +829,9 @@ export default function TimingScreen() {
       ? segments.find((s) => s.order === judgeStationOrder && s.type === 'station')
       : undefined;
     const clockRun = runList[0];
-    const sharedMs = getSharedRaceMs(selectedEvent?.raceStartedAt, now);
-    const heatStarted = !!clockRun || sharedMs != null;
-    const totalMs = clockRun ? getTotalMs(clockRun, now) : (sharedMs ?? 0);
+    const sharedMs = getSharedRaceMs(displayClock, now);
+    const heatStarted = sharedMs != null || !!clockRun;
+    const totalMs = sharedMs ?? (clockRun ? getTotalMs(clockRun, now) : 0);
     return (
       <View style={styles.timerSection}>
         <View style={styles.timerCard}>
@@ -602,10 +849,14 @@ export default function TimingScreen() {
               {heatStarted ? formatMs(totalMs) : '—'}
             </Text>
           </View>
-          <Text style={heatStarted ? styles.liveHint : styles.pausedHint}>
-            {heatStarted
-              ? 'Bateria em andamento. Toque no atleta ao chegar na estação.'
-              : 'Aguardando o organizador iniciar a bateria.'}
+          <Text style={eventFinished || racePaused ? styles.pausedHint : heatStarted ? styles.liveHint : styles.pausedHint}>
+            {eventFinished
+              ? 'Evento encerrado. O tempo total foi congelado.'
+              : racePaused
+                ? 'Tempo total pausado pelo organizador. Apontamento bloqueado até retomar.'
+                : heatStarted
+                  ? 'Bateria em andamento. Toque no atleta ao chegar na estação.'
+                  : 'Aguardando o organizador iniciar a bateria.'}
           </Text>
         </View>
       </View>
@@ -627,9 +878,9 @@ export default function TimingScreen() {
       ? segments[activeRun.segmentIndex]
       : stationSegment ?? segments[activeRun.segmentIndex];
     const segmentMs = atJudgeStation || !isJudgeView ? getSegmentMs(activeRun, now) : 0;
-    const totalMs = getTotalMs(activeRun, now);
+    const totalMs = runDisplayMs(activeRun);
     const segmentRunning = isSegmentRunning(activeRun);
-    const totalPaused = isTotalTimePaused(activeRun);
+    const totalPaused = racePaused || isTotalTimePaused(activeRun);
 
     return (
       <View ref={timerPanelRef} style={styles.timerSection} collapsable={false}>
@@ -705,8 +956,14 @@ export default function TimingScreen() {
                     </Text>
                     <Text style={styles.totalValue}>{formatMs(totalMs)}</Text>
                   </View>
-                  {totalPaused && !isJudgeView && (
-                    <Text style={styles.pausedHint}>Tempo total pausado</Text>
+                  {(eventFinished || totalPaused) && (
+                    <Text style={styles.pausedHint}>
+                      {eventFinished
+                        ? 'Evento encerrado. O tempo total foi congelado.'
+                        : isJudgeView
+                          ? 'Tempo total pausado pelo organizador. Apontamento bloqueado até retomar.'
+                          : 'Tempo total pausado'}
+                    </Text>
                   )}
                   {!isJudgeView &&
                     !totalPaused &&
@@ -730,7 +987,7 @@ export default function TimingScreen() {
                     />
                   )}
 
-                {isJudgeView && judgeActions?.canReceive && (
+                {isJudgeView && !eventFinished && judgeActions?.canReceive && !racePaused && (
                   <Button
                     label="Atleta chegou — iniciar cronômetro"
                     onPress={handleReceiveAtStation}
@@ -738,7 +995,7 @@ export default function TimingScreen() {
                     style={{ marginBottom: 8 }}
                   />
                 )}
-                {isJudgeView && judgeActions?.canRelease && (
+                {isJudgeView && !eventFinished && judgeActions?.canRelease && !racePaused && (
                   <Button
                     label="Encerrar estação e registrar tempo"
                     onPress={handleReleaseFromStation}
@@ -789,6 +1046,41 @@ export default function TimingScreen() {
     );
   }
 
+  if (!pickedEventId || !selectedEvent) {
+    return (
+      <Screen scroll>
+        <Text style={[styles.heading, narrow && styles.headingCompact]}>Cronômetro</Text>
+        <Text style={styles.subheading}>
+          Selecione um evento para carregar só os atletas e o cronômetro dessa prova.
+        </Text>
+        <Text style={styles.sectionTitle}>Eventos</Text>
+        {timingEvents.map((event) => (
+          <Card
+            key={event.id}
+            title={event.name}
+            subtitle={`${event.location} · ${new Date(event.date).toLocaleDateString('pt-BR')}`}
+            badge={formatStatusLabel(event.status)}
+            badgeColor={
+              event.status === 'live'
+                ? HyroxTheme.success + '33'
+                : event.status === 'finished'
+                  ? HyroxTheme.textMuted + '33'
+                  : HyroxTheme.warning + '33'
+            }
+            onPress={() => handleEventChange(event.id)}>
+            <Text style={styles.eventCardMeta}>
+              {event.status === 'finished'
+                ? 'Encerrado — o tempo total fica congelado'
+                : event.status === 'live'
+                  ? 'Ao vivo — toque para cronometrar'
+                  : 'Toque para abrir o cronômetro'}
+            </Text>
+          </Card>
+        ))}
+      </Screen>
+    );
+  }
+
   const sidebar = (
     <>
       {runList.length > 0 && (
@@ -801,7 +1093,7 @@ export default function TimingScreen() {
           {runList.map((run) => {
             const key = participantKey(run.participant);
             const isActive = key === activeKey;
-            const liveTotal = getTotalMs(run, now);
+            const liveTotal = runDisplayMs(run);
             return (
               <Pressable
                 key={key}
@@ -871,7 +1163,7 @@ export default function TimingScreen() {
                     hour: '2-digit',
                     minute: '2-digit',
                   })}
-                  {heat.startedAt || selectedEvent?.raceStartedAt ? ' · iniciada' : ''}
+                  {heat.startedAt ? ' · iniciada' : ''}
                   {' · '}
                   {assigned.length} atleta{assigned.length === 1 ? '' : 's'}
                 </Text>
@@ -880,7 +1172,7 @@ export default function TimingScreen() {
                     {assigned.map((p) => `#${p.bib} ${p.label}`).join(' · ')}
                   </Text>
                 )}
-                {isOrganizer && (
+                {isOrganizer && !eventFinished && (
                   <Button
                     label={heat.startedAt ? 'Reiniciar bateria' : 'Iniciar bateria'}
                     variant="primary"
@@ -903,18 +1195,20 @@ export default function TimingScreen() {
         </View>
       )}
 
-      {isJudgeView && (
+      {isJudgeView && !eventFinished && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Atletas da estação</Text>
           <Text style={styles.hint}>
             Toque no atleta quando ele chegar. O cronômetro da estação aparece acima.
           </Text>
-          {participants.filter((p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns').length === 0 ? (
-            <Text style={styles.empty}>Nenhum atleta inscrito neste evento ainda.</Text>
+          {judgeRosterParticipants.length === 0 ? (
+            <Text style={styles.empty}>
+              {participants.length === 0
+                ? 'Nenhum atleta inscrito neste evento ainda.'
+                : 'Todos os atletas desta estação já foram apontados.'}
+            </Text>
           ) : (
-            participants
-              .filter((p) => p.status !== 'finished' && p.status !== 'dnf' && p.status !== 'dns')
-              .map((p) => {
+            judgeRosterParticipants.map((p) => {
                 const key = participantKey(p);
                 const inRun = !!runs[key];
                 return (
@@ -946,7 +1240,7 @@ export default function TimingScreen() {
         </View>
       )}
 
-      {isOrganizer && (
+      {isOrganizer && !eventFinished && (
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Iniciar participante</Text>
           <TextInput
@@ -1010,21 +1304,16 @@ export default function TimingScreen() {
                 : 'Inicie a bateria. Todos os atletas seguem a ordem do percurso. Juízes cronometram cada estação.'}
           </Text>
 
-          <Text style={styles.label}>Evento</Text>
-          <View style={styles.chipRow}>
-            {timingEvents.map((event) => (
-              <Pressable
-                key={event.id}
-                style={[styles.chip, eventId === event.id && styles.chipActive]}
-                onPress={() => handleEventChange(event.id)}>
-                <Text
-                  style={[styles.chipText, eventId === event.id && styles.chipTextActive]}
-                  numberOfLines={1}>
-                  {event.name}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
+          <Pressable onPress={handleBackToEventList} style={styles.backToList}>
+            <Text style={styles.backToListText}>← Eventos</Text>
+          </Pressable>
+          <Text style={styles.selectedEventName} numberOfLines={2}>
+            {selectedEvent.name}
+          </Text>
+          <Text style={styles.selectedEventMeta}>
+            {formatStatusLabel(selectedEvent.status)}
+            {selectedEvent.location ? ` · ${selectedEvent.location}` : ''}
+          </Text>
 
           {wide && (activeRun ? renderActiveTimer() : isJudgeView ? renderJudgeWaitingTimer() : null)}
         </View>
@@ -1051,19 +1340,11 @@ const styles = StyleSheet.create({
   headingCompact: { fontSize: 24 },
   subheading: { color: HyroxTheme.textMuted, fontSize: 14, marginTop: 4, marginBottom: 16, lineHeight: 20 },
   label: { color: HyroxTheme.text, fontSize: 14, fontWeight: '600', marginBottom: 8 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 16 },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: HyroxTheme.surface,
-    borderWidth: 1,
-    borderColor: HyroxTheme.border,
-    maxWidth: '100%',
-  },
-  chipActive: { backgroundColor: HyroxTheme.accent, borderColor: HyroxTheme.accent },
-  chipText: { color: HyroxTheme.textMuted, fontSize: 12, fontWeight: '600' },
-  chipTextActive: { color: '#000' },
+  backToList: { alignSelf: 'flex-start', marginBottom: 8, paddingVertical: 4 },
+  backToListText: { color: HyroxTheme.accent, fontSize: 14, fontWeight: '700' },
+  selectedEventName: { color: HyroxTheme.text, fontSize: 20, fontWeight: '800', marginBottom: 4 },
+  selectedEventMeta: { color: HyroxTheme.textMuted, fontSize: 13, marginBottom: 16 },
+  eventCardMeta: { color: HyroxTheme.textMuted, fontSize: 13, marginTop: 6 },
   section: { marginBottom: 20 },
   sectionTitle: {
     color: HyroxTheme.accent,

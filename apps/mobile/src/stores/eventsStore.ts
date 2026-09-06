@@ -26,7 +26,9 @@ import {
   createEventInSupabase,
   deleteEventInSupabase,
   finishEventInSupabase,
+  persistEventRaceClock,
 } from '@/src/api/eventsRepository';
+import { clockFromEvent, pauseRaceClock } from '@/src/utils/raceClock';
 import { pushEventToSupabase, scheduleEventSync } from '@/src/api/syncService';
 import { getSupabase, isSupabaseConfigured } from '@/src/lib/supabase';
 import { getEventFinishReadiness, getFinishEventBlockReason } from '@/src/utils/eventFinish';
@@ -88,6 +90,10 @@ type EventsState = {
   removeHeat: (eventId: string, heatId: string) => ActionResult;
   markHeatStarted: (eventId: string, heatId: string, startedAt?: string) => ActionResult;
   setRaceStartedAt: (eventId: string, startedAt: string | null) => void;
+  setRaceClock: (
+    eventId: string,
+    clock: { startedAt: string | null; pausedAt: string | null; pauseAccumMs: number },
+  ) => void;
   setHydrated: (value: boolean) => void;
 };
 
@@ -337,12 +343,23 @@ export const useEventsStore = create<EventsState>()(
           const blockReason = getFinishEventBlockReason(readiness);
           if (blockReason) return { ok: false, reason: blockReason };
 
+          const clock = clockFromEvent(event);
+          const frozenClock =
+            clock.startedAt && !clock.pausedAt ? pauseRaceClock(clock) : clock;
+
           set((state) => ({
             events: patchEvent(state.events, eventId, (e) => ({
               ...e,
               status: 'finished',
+              raceStartedAt: frozenClock.startedAt,
+              racePausedAt: frozenClock.pausedAt,
+              racePauseAccumMs: frozenClock.pauseAccumMs,
             })),
           }));
+
+          if (event && frozenClock.startedAt) {
+            void persistEventRaceClock({ ...event, status: 'finished' }, frozenClock);
+          }
 
           if (!isSupabaseConfigured()) return { ok: true };
 
@@ -470,7 +487,6 @@ export const useEventsStore = create<EventsState>()(
         set((state) => ({
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
-            raceStartedAt: at,
             heats: (e.heats ?? []).map((h) =>
               h.id === heatId ? { ...h, startedAt: at } : h,
             ),
@@ -483,6 +499,19 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             raceStartedAt: startedAt,
+            ...(startedAt
+              ? { racePausedAt: null, racePauseAccumMs: e.racePauseAccumMs ?? 0 }
+              : { racePausedAt: null, racePauseAccumMs: 0 }),
+          })),
+        }));
+      },
+      setRaceClock: (eventId, clock) => {
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => ({
+            ...e,
+            raceStartedAt: clock.startedAt,
+            racePausedAt: clock.pausedAt,
+            racePauseAccumMs: clock.pauseAccumMs,
           })),
         }));
       },

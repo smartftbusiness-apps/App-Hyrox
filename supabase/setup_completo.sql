@@ -66,6 +66,8 @@ create table if not exists events (
   status event_status not null default 'draft',
   course_template_id uuid references course_templates(id) on delete set null,
   race_started_at timestamptz,
+  race_paused_at timestamptz,
+  race_pause_accum_ms bigint not null default 0,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

@@ -2,7 +2,7 @@ import type { Segment } from '@/src/domain/types';
 
 import type { LiveRunSnapshot, TimingRunState } from '@/src/utils/timingRun';
 
-import { isSegmentRunning } from '@/src/utils/timingRun';
+import { isSegmentRunning, isTotalTimePaused } from '@/src/utils/timingRun';
 
 
 
@@ -280,6 +280,7 @@ export function getJudgeStationActions(
 
   const running = isSegmentRunning(run);
   const alreadyDone = hasCompletedJudgeStation(run, segments, stationOrder);
+  const racePaused = isTotalTimePaused(run);
 
 
 
@@ -289,9 +290,9 @@ export function getJudgeStationActions(
 
     atStation,
 
-    canReceive: !alreadyDone && (!atStation || !running),
+    canReceive: !racePaused && !alreadyDone && (!atStation || !running),
 
-    canRelease: atStation && running,
+    canRelease: !racePaused && atStation && running,
 
   };
 
