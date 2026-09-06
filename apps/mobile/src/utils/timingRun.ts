@@ -249,6 +249,18 @@ export function isCloudTimingAhead(
   return cloudSeg > localSeg + 300;
 }
 
+/** Mantém o apontamento local do juiz e alinha o início da prova com a nuvem. */
+export function alignRunToOrganizerClock(
+  local: TimingRunState,
+  cloud: TimingRunState,
+): TimingRunState {
+  return {
+    ...local,
+    raceStartedAt: cloud.raceStartedAt,
+    penaltiesMs: Math.max(local.penaltiesMs, cloud.penaltiesMs),
+  };
+}
+
 export function advanceSegment(
   run: TimingRunState,
   segmentId: string,
@@ -311,9 +323,14 @@ export function receiveAthleteAtStation(
 
   if (run.segmentIndex > stationIdx) return null;
 
-  if (runIdx != null && run.segmentIndex === runIdx) {
+  const elapsedOnRace = getTotalMs(run, now);
+  const alreadyRecorded = run.segmentTimes.reduce((sum, st) => sum + st.durationMs, 0);
+  const intervalMs = Math.max(0, elapsedOnRace - alreadyRecorded);
+
+  if (runIdx != null && !run.completed.includes(runIdx)) {
     const runSegment = segments[runIdx];
-    const durationMs = getSegmentMs(run, now);
+    const durationMs =
+      run.segmentIndex === runIdx ? getSegmentMs(run, now) : intervalMs;
     const segmentTimes =
       durationMs > 0
         ? [...run.segmentTimes, { segmentId: runSegment.id, durationMs }]

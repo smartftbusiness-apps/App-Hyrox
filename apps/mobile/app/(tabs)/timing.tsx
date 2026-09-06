@@ -41,6 +41,7 @@ import { useAuthStore } from '@/src/stores/authStore';
 import { useIsEventOwner } from '@/src/hooks/useEvent';
 import {
   advanceSegment,
+  alignRunToOrganizerClock,
   createHeatTimingRun,
   createJudgeStationWatchRun,
   getSegmentMs,
@@ -217,24 +218,25 @@ export default function TimingScreen() {
             const local = prev[key];
             const cloudUpdatedAt = new Date(updatedAt).getTime();
             if (
-              !isCloudTimingAhead(local, cloudRun, cloudUpdatedAt, localTouchedAtRef.current[key])
+              isCloudTimingAhead(local, cloudRun, cloudUpdatedAt, localTouchedAtRef.current[key])
             ) {
+              next[key] = cloudRun;
+              changed = true;
               continue;
             }
-            next[key] = cloudRun;
-            changed = true;
+            if (local && local.raceStartedAt !== cloudRun.raceStartedAt) {
+              next[key] = alignRunToOrganizerClock(local, cloudRun);
+              changed = true;
+            }
           }
           for (const participant of participants) {
-            if (participant.status === 'finished' || participant.status === 'dnf' || participant.status === 'dns') {
-              continue;
-            }
+            if (participant.status !== 'racing' || !participant.racingStartedAt) continue;
             const key = participantKey(participant);
             if (next[key]) continue;
-            if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
-            const startedAt = participant.racingStartedAt
-              ? new Date(participant.racingStartedAt).getTime()
-              : Date.now();
-            next[key] = createJudgeStationWatchRun(participant, startedAt);
+            next[key] = createJudgeStationWatchRun(
+              participant,
+              new Date(participant.racingStartedAt).getTime(),
+            );
             changed = true;
           }
           if (!changed) return prev;
@@ -245,7 +247,7 @@ export default function TimingScreen() {
                   isParticipantVisibleToJudge(next[key], segments, judgeStationOrder),
                 );
           setActiveKey((current) =>
-            current && visibleKeys.includes(current) ? current : null,
+            current && visibleKeys.includes(current) ? current : visibleKeys[0] ?? null,
           );
           return next;
         });
@@ -395,10 +397,17 @@ export default function TimingScreen() {
   function ensureJudgeRun(participant: TimingParticipant): string {
     const key = participantKey(participant);
     if (!runs[key]) {
-      const startedAt = participant.racingStartedAt
-        ? new Date(participant.racingStartedAt).getTime()
-        : Date.now();
-      const newRun = createJudgeStationWatchRun(participant, startedAt);
+      if (participant.status !== 'racing' || !participant.racingStartedAt) {
+        Alert.alert(
+          'Bateria',
+          'Aguarde o organizador iniciar a bateria. O cronômetro total só aparece depois do start.',
+        );
+        return key;
+      }
+      const newRun = createJudgeStationWatchRun(
+        participant,
+        new Date(participant.racingStartedAt).getTime(),
+      );
       setRuns((prev) => ({ ...prev, [key]: newRun }));
     }
     setActiveKey(key);
@@ -521,6 +530,9 @@ export default function TimingScreen() {
     const station = judgeStationOrder != null
       ? segments.find((s) => s.order === judgeStationOrder && s.type === 'station')
       : undefined;
+    const clockRun = runList[0];
+    const heatStarted = !!clockRun;
+    const totalMs = clockRun ? getTotalMs(clockRun, now) : 0;
     return (
       <View style={styles.timerSection}>
         <View style={styles.timerCard}>
@@ -532,8 +544,14 @@ export default function TimingScreen() {
             segmentIndex={station?.order ?? 0}
             totalSegments={segments.length || 1}
           />
+          <View style={styles.totalRow}>
+            <Text style={styles.totalLabel}>Tempo total da prova</Text>
+            <Text style={styles.totalValue}>{heatStarted ? formatMs(totalMs) : '—'}</Text>
+          </View>
           <Text style={styles.pausedHint}>
-            Só o tempo da estação. O cronômetro geral é do organizador.
+            {heatStarted
+              ? 'Bateria iniciada pelo organizador. Toque no atleta ao chegar na estação.'
+              : 'Aguardando o organizador iniciar a bateria.'}
           </Text>
         </View>
       </View>
@@ -607,13 +625,12 @@ export default function TimingScreen() {
                 <View style={styles.timerCard}>
                   {isJudgeView && !atJudgeStation && (
                     <Text style={styles.runIntervalHint}>
-                      Registre só a chegada e a saída desta estação. O tempo total da prova é do
-                      organizador.
+                      Tempo da estação (parte do cronômetro total). Registre chegada e saída.
                     </Text>
                   )}
                   {isJudgeView && atJudgeStation && (
                     <Text style={styles.runIntervalHint}>
-                      Tempo nesta estação — encerre quando o atleta sair.
+                      Estação em andamento — este tempo entra no cronômetro total da prova.
                     </Text>
                   )}
                   <TimerDisplay
@@ -628,12 +645,12 @@ export default function TimingScreen() {
                     segmentIndex={isJudgeView ? (stationSegment?.order ?? segment.order) : segment.order}
                     totalSegments={segments.length}
                   />
-                  {!isJudgeView && (
-                    <View style={styles.totalRow}>
-                      <Text style={styles.totalLabel}>Tempo total</Text>
-                      <Text style={styles.totalValue}>{formatMs(totalMs)}</Text>
-                    </View>
-                  )}
+                  <View style={styles.totalRow}>
+                    <Text style={styles.totalLabel}>
+                      {isJudgeView ? 'Tempo total da prova' : 'Tempo total'}
+                    </Text>
+                    <Text style={styles.totalValue}>{formatMs(totalMs)}</Text>
+                  </View>
                   {totalPaused && !isJudgeView && (
                     <Text style={styles.pausedHint}>Tempo total pausado</Text>
                   )}
@@ -724,17 +741,13 @@ export default function TimingScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Em prova ({runList.length})</Text>
           <Text style={styles.hint}>
-            Toque no atleta para ver o cronômetro e os botões de controle logo abaixo.
+            Toque no atleta para ver o cronômetro
+            {isJudgeView ? ' total e apontar a estação.' : ' e os botões de controle logo abaixo.'}
           </Text>
           {runList.map((run) => {
             const key = participantKey(run.participant);
             const isActive = key === activeKey;
-            const liveTotal =
-              isJudgeView && judgeStationOrder != null && isParticipantAtStation(run, segments, judgeStationOrder)
-                ? getSegmentMs(run, now)
-                : isJudgeView
-                  ? 0
-                  : getTotalMs(run, now);
+            const liveTotal = getTotalMs(run, now);
             return (
               <Pressable
                 key={key}
@@ -771,7 +784,7 @@ export default function TimingScreen() {
                   </Text>
                 </View>
                 <Text style={[styles.liveTime, compact && styles.liveTimeCompact]}>
-                  {isJudgeView && liveTotal === 0 ? '—' : formatMs(liveTotal)}
+                  {formatMs(liveTotal)}
                 </Text>
               </Pressable>
             );
@@ -790,8 +803,8 @@ export default function TimingScreen() {
           <Text style={styles.sectionTitle}>Baterias</Text>
           {isJudgeView && (
             <Text style={styles.hint}>
-              O organizador controla o cronômetro da prova. Você só registra chegada e saída da
-              sua estação.
+              O organizador inicia a bateria. Você vê o tempo total e registra só a chegada e a
+              saída da sua estação — esse tempo entra no cronômetro da prova.
             </Text>
           )}
           {(selectedEvent?.heats ?? []).map((heat) => {
@@ -936,7 +949,7 @@ export default function TimingScreen() {
           <Text style={styles.subheading}>
             {isJudgeView
               ? judgeStationOrder != null
-                ? `Sua estação: ${stationLabel(segments, judgeStationOrder)}. Aponte só a chegada e a saída. O tempo total é do organizador.`
+                ? `Sua estação: ${stationLabel(segments, judgeStationOrder)}. O tempo total vem do organizador; sua marcação é o split desta estação.`
                 : 'Aguardando o organizador designar sua estação. Enquanto isso, você vê a prova em andamento.'
               : isOrganizer
                 ? 'Visão do organizador: todos os atletas, todas as estações. Inicie baterias ou avance segmentos manualmente.'
