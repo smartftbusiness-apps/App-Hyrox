@@ -28,7 +28,7 @@ import { isSupabaseConfigured } from '@/src/lib/supabase';
 import { useAuthStore } from '@/src/stores/authStore';
 import { useEventStaffStore, type EventStaffMember } from '@/src/stores/eventStaffStore';
 import { useEventsStore } from '@/src/stores/eventsStore';
-import { stationLabel, stationSegmentOptions } from '@/src/utils/stationTiming';
+import { stationLabel } from '@/src/utils/stationTiming';
 
 const EMPTY_STAFF: EventStaffMember[] = [];
 const EMPTY_ORGANIZER_JUDGES: OrganizerJudge[] = [];
@@ -52,7 +52,7 @@ export default function EventJudgesScreen() {
 
   useEffect(() => {
     if (!eventId || !event || !perms.canManageJudges) return;
-    if (stationSegmentOptions(event.segments).length > 0) return;
+    if (event.segments.length > 0) return;
     resetSegmentsToHyrox(eventId);
   }, [event, eventId, perms.canManageJudges, resetSegmentsToHyrox]);
 
@@ -64,7 +64,18 @@ export default function EventJudgesScreen() {
     if (cloudId) {
       try {
         const rows = await fetchStaffForEvent(cloudId);
-        useEventStaffStore.getState().setStaffForEvent(eventId, rows);
+        const local = useEventStaffStore.getState().staffByEvent[eventId] ?? [];
+        const merged =
+          rows.length > 0
+            ? rows.map((row) => {
+                const prev = local.find((item) => item.id === row.id || item.userId === row.userId);
+                return {
+                  ...row,
+                  stationOrder: row.stationOrder ?? prev?.stationOrder ?? null,
+                };
+              })
+            : local;
+        useEventStaffStore.getState().setStaffForEvent(eventId, merged);
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Erro ao carregar juízes do evento';
         setLoadError(message);
@@ -252,12 +263,19 @@ export default function EventJudgesScreen() {
   }
 
   async function handleChangeStation(member: EventStaffMember, order: number | null) {
+    useEventStaffStore.getState().setStaffForEvent(
+      eid,
+      staff.map((item) =>
+        item.id === member.id ? { ...item, stationOrder: order } : item,
+      ),
+    );
     const result =
       order == null
         ? await clearEventStaffStation(member.id)
         : await updateEventStaffStation(member.id, order);
     if (!result.ok) {
       Alert.alert('Erro', result.reason);
+      await loadStaff();
       return;
     }
     await loadStaff();

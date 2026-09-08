@@ -194,8 +194,8 @@ export default function LeaderboardScreen() {
               <Text style={styles.time}>{formatMs(entry.totalMs)}</Text>
             </Pressable>
             {isExpanded &&
-              entry.splits.map((split) => (
-                <View key={split.segmentId} style={styles.splitRow}>
+              entry.splits.map((split, splitIdx) => (
+                <View key={`${split.segmentId}-${split.segmentOrder}-${splitIdx}`} style={styles.splitRow}>
                   <Text style={styles.splitOrder}>{split.segmentOrder}</Text>
                   <View style={styles.splitInfo}>
                     <Text style={styles.splitName}>{split.segmentName}</Text>

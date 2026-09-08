@@ -6,10 +6,22 @@ function markKey(eventId: string, stationOrder: number, participantKey: string):
   return `${eventId}:${stationOrder}:${participantKey}`;
 }
 
+function markTimestamp(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (value === true) return 1;
+  return null;
+}
+
 type StationMarksState = {
-  marked: Record<string, true>;
+  marked: Record<string, number | true>;
   markStation: (eventId: string, stationOrder: number, participantKey: string) => void;
   isMarked: (eventId: string, stationOrder: number, participantKey: string) => boolean;
+  isMarkedAfter: (
+    eventId: string,
+    stationOrder: number,
+    participantKey: string,
+    startedAtMs?: number | null,
+  ) => boolean;
   clearEvent: (eventId: string) => void;
   clearParticipants: (eventId: string, participantKeys: string[]) => void;
 };
@@ -20,11 +32,16 @@ export const useStationMarksStore = create<StationMarksState>()(
       marked: {},
       markStation: (eventId, stationOrder, participantKey) => {
         const key = markKey(eventId, stationOrder, participantKey);
-        if (get().marked[key]) return;
-        set((state) => ({ marked: { ...state.marked, [key]: true } }));
+        set((state) => ({ marked: { ...state.marked, [key]: Date.now() } }));
       },
       isMarked: (eventId, stationOrder, participantKey) =>
-        !!get().marked[markKey(eventId, stationOrder, participantKey)],
+        markTimestamp(get().marked[markKey(eventId, stationOrder, participantKey)]) != null,
+      isMarkedAfter: (eventId, stationOrder, participantKey, startedAtMs) => {
+        const at = markTimestamp(get().marked[markKey(eventId, stationOrder, participantKey)]);
+        if (at == null) return false;
+        if (startedAtMs && at <= startedAtMs) return false;
+        return true;
+      },
       clearEvent: (eventId) => {
         const prefix = `${eventId}:`;
         set((state) => {

@@ -153,7 +153,6 @@ export function hasCompletedJudgeStation(
 ): boolean {
   const stationIdx = segmentIndexForOrder(segments, stationOrder);
   if (stationIdx < 0) return false;
-  if (run.completed.includes(stationIdx)) return true;
   if (run.raceComplete) return true;
   return run.segmentIndex > stationIdx;
 }
