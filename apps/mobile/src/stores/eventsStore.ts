@@ -81,6 +81,7 @@ type EventsState = {
   removeCategory: (eventId: string, categoryId: string) => ActionResult;
   addSegment: (eventId: string, input: AddSegmentInput) => ActionResult;
   removeSegment: (eventId: string, segmentId: string) => ActionResult;
+  moveSegment: (eventId: string, segmentId: string, direction: -1 | 1) => ActionResult;
   resetSegmentsToHyrox: (eventId: string) => ActionResult;
   updateEventStatus: (eventId: string, status: EventStatus) => ActionResult;
   finishEvent: (eventId: string) => Promise<ActionResult>;
@@ -207,12 +208,10 @@ export const useEventsStore = create<EventsState>()(
         if (isSupabaseConfigured()) {
           void createEventInSupabase(event).then((result) => {
             if (!result.ok || !result.data) return;
-            const organizerId = useOrganizerStore.getState().organizerId;
             set((state) => ({
               events: patchEvent(state.events, id, (e) => ({
                 ...e,
                 supabaseId: result.data,
-                organizerId: organizerId ?? e.organizerId,
               })),
             }));
             scheduleEventSync(id);
@@ -291,9 +290,10 @@ export const useEventsStore = create<EventsState>()(
               name: input.name.trim(),
               target: input.target.trim(),
             };
-            return { ...e, segments: [...e.segments, segment] };
+            return { ...e, segments: [...e.segments, segment], courseLayoutSynced: true };
           }),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       removeSegment: (eventId, segmentId) => {
@@ -304,8 +304,34 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             segments: reindexSegments(e.segments.filter((s) => s.id !== segmentId)),
+            courseLayoutSynced: true,
           })),
         }));
+        scheduleEventSync(eventId);
+        return { ok: true };
+      },
+      moveSegment: (eventId, segmentId, direction) => {
+        const event = get().events.find((e) => e.id === eventId);
+        const auth = assertEventCreator(event);
+        if (!auth.ok) return auth;
+        const idx = event!.segments.findIndex((s) => s.id === segmentId);
+        const swapWith = idx + direction;
+        if (idx < 0 || swapWith < 0 || swapWith >= event!.segments.length) {
+          return { ok: false, reason: 'Não é possível mover este segmento.' };
+        }
+        set((state) => ({
+          events: patchEvent(state.events, eventId, (e) => {
+            const next = [...e.segments];
+            const from = next.findIndex((s) => s.id === segmentId);
+            const to = from + direction;
+            if (from < 0 || to < 0 || to >= next.length) return e;
+            const current = next[from];
+            next[from] = next[to];
+            next[to] = current;
+            return { ...e, segments: reindexSegments(next), courseLayoutSynced: true };
+          }),
+        }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       resetSegmentsToHyrox: (eventId) => {
@@ -316,8 +342,10 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             segments: cloneHyroxSegments(eventId),
+            courseLayoutSynced: true,
           })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       updateEventStatus: (eventId, status) => {
@@ -364,22 +392,23 @@ export const useEventsStore = create<EventsState>()(
           if (!isSupabaseConfigured()) return { ok: true };
 
           try {
-            const dbResult = await finishEventInSupabase({ ...event!, status: 'finished' });
-            void pushEventToSupabase(eventId);
-            if (!dbResult.ok) {
-              return {
-                ok: true,
-                warning: `Evento encerrado no app, mas não foi salvo no Supabase: ${dbResult.reason}`,
-              };
-            }
-
-            if (dbResult.data) {
+            const current =
+              get().events.find((e) => e.id === eventId) ?? { ...event!, status: 'finished' as const };
+            const dbResult = await finishEventInSupabase(current);
+            if (dbResult.ok && dbResult.data) {
               set((state) => ({
                 events: patchEvent(state.events, eventId, (e) => ({
                   ...e,
                   supabaseId: dbResult.data ?? e.supabaseId ?? null,
                 })),
               }));
+            }
+            await pushEventToSupabase(eventId);
+            if (!dbResult.ok) {
+              return {
+                ok: true,
+                warning: `Evento encerrado no app, mas não foi salvo no Supabase: ${dbResult.reason}`,
+              };
             }
           } catch (syncError) {
             const message =
@@ -433,8 +462,10 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             heats: [...(e.heats ?? []), heat],
+            courseLayoutSynced: true,
           })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       updateHeat: (eventId, heatId, input) => {
@@ -460,8 +491,10 @@ export const useEventsStore = create<EventsState>()(
                   }
                 : h,
             ),
+            courseLayoutSynced: true,
           })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       removeHeat: (eventId, heatId) => {
@@ -472,8 +505,10 @@ export const useEventsStore = create<EventsState>()(
           events: patchEvent(state.events, eventId, (e) => ({
             ...e,
             heats: (e.heats ?? []).filter((h) => h.id !== heatId),
+            courseLayoutSynced: true,
           })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       markHeatStarted: (eventId, heatId, startedAt) => {
@@ -490,8 +525,10 @@ export const useEventsStore = create<EventsState>()(
             heats: (e.heats ?? []).map((h) =>
               h.id === heatId ? { ...h, startedAt: at } : h,
             ),
+            courseLayoutSynced: true,
           })),
         }));
+        scheduleEventSync(eventId);
         return { ok: true };
       },
       setRaceStartedAt: (eventId, startedAt) => {

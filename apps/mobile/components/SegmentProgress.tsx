@@ -16,8 +16,8 @@ export function SegmentProgress({ segments, currentIndex, completedIndices }: Se
       style={styles.scroll}
       contentContainerStyle={styles.scrollContent}>
       {segments.map((seg, idx) => {
-        const isCurrent = idx === currentIndex;
         const isDone = completedIndices.includes(idx);
+        const isCurrent = !isDone && idx === currentIndex;
         return (
           <View
             key={seg.id}
@@ -62,7 +62,8 @@ const styles = StyleSheet.create({
   },
   done: {
     borderColor: HyroxTheme.success,
-    opacity: 0.7,
+    backgroundColor: 'rgba(46, 204, 113, 0.22)',
+    opacity: 1,
   },
   order: {
     color: HyroxTheme.textMuted,

@@ -23,6 +23,7 @@ export default function StationsScreen() {
   const perms = useEventPermissions(event);
   const addSegment = useEventsStore((s) => s.addSegment);
   const removeSegment = useEventsStore((s) => s.removeSegment);
+  const moveSegment = useEventsStore((s) => s.moveSegment);
   const resetSegmentsToHyrox = useEventsStore((s) => s.resetSegmentsToHyrox);
   const canEdit = perms.canEditStructure;
 
@@ -94,7 +95,7 @@ export default function StationsScreen() {
       <Screen scroll>
         <Text style={styles.heading}>Percurso do evento</Text>
         <Text style={styles.subheading}>
-          {event.segments.length} segmentos · ordem = sequência da prova
+          {event.segments.length} segmentos · use ↑ ↓ para posicionar as estações
         </Text>
 
         {!canEdit && (
@@ -138,7 +139,7 @@ export default function StationsScreen() {
         )}
 
         <Text style={styles.listTitle}>Sequência da prova</Text>
-        {event.segments.map((seg) => (
+        {event.segments.map((seg, idx) => (
           <View key={seg.id} style={styles.row}>
             <Text style={styles.order}>{seg.order}</Text>
             <View style={styles.rowInfo}>
@@ -148,11 +149,34 @@ export default function StationsScreen() {
               </Text>
             </View>
             {canEdit && (
-              <Pressable
-                style={styles.removeBtn}
-                onPress={() => handleRemove(seg.id, seg.name)}>
-                <Text style={styles.removeText}>✕</Text>
-              </Pressable>
+              <View style={styles.rowActions}>
+                <Pressable
+                  style={[styles.moveBtn, idx === 0 && styles.moveBtnDisabled]}
+                  disabled={idx === 0}
+                  onPress={() => {
+                    const result = moveSegment(eventId, seg.id, -1);
+                    if (!result.ok) Alert.alert('Não foi possível', result.reason);
+                  }}>
+                  <Text style={styles.moveText}>↑</Text>
+                </Pressable>
+                <Pressable
+                  style={[
+                    styles.moveBtn,
+                    idx === event.segments.length - 1 && styles.moveBtnDisabled,
+                  ]}
+                  disabled={idx === event.segments.length - 1}
+                  onPress={() => {
+                    const result = moveSegment(eventId, seg.id, 1);
+                    if (!result.ok) Alert.alert('Não foi possível', result.reason);
+                  }}>
+                  <Text style={styles.moveText}>↓</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.removeBtn}
+                  onPress={() => handleRemove(seg.id, seg.name)}>
+                  <Text style={styles.removeText}>✕</Text>
+                </Pressable>
+              </View>
             )}
           </View>
         ))}
@@ -205,6 +229,15 @@ const styles = StyleSheet.create({
   rowInfo: { flex: 1 },
   rowName: { color: HyroxTheme.text, fontSize: 15, fontWeight: '600' },
   rowMeta: { color: HyroxTheme.textMuted, fontSize: 12, marginTop: 2 },
+  rowActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  moveBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: HyroxTheme.surfaceElevated,
+  },
+  moveBtnDisabled: { opacity: 0.35 },
+  moveText: { color: HyroxTheme.accent, fontSize: 16, fontWeight: '800' },
   removeBtn: { padding: 8 },
   removeText: { color: HyroxTheme.danger, fontSize: 16, fontWeight: '700' },
 });

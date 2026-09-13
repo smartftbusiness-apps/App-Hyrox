@@ -10,7 +10,8 @@ export function ErrorFallback({ error, retry }: ErrorBoundaryProps) {
     if (retried.current) return;
     if (!error.message?.includes("cannot add 'postgres_changes'")) return;
     retried.current = true;
-    retry();
+    const timer = setTimeout(() => retry(), 250);
+    return () => clearTimeout(timer);
   }, [error.message, retry]);
 
   return (

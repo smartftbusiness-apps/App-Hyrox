@@ -57,6 +57,10 @@ export interface HyroxEvent {
   racePausedAt?: string | null;
   /** Ms acumulados de pausas anteriores do tempo total */
   racePauseAccumMs?: number;
+  /** true quando segments/heats vieram do course_layout na nuvem */
+  courseLayoutSynced?: boolean;
+  /** Apontamentos de estação na nuvem, chave = bib */
+  liveStationProgress?: Record<string, { completedOrders: number[]; currentOrder: number | null }>;
 }
 
 export interface Athlete {
@@ -106,4 +110,8 @@ export interface LeaderboardEntry {
 export interface SegmentTime {
   segmentId: string;
   durationMs: number;
+  /** Ordem no percurso — usada no ranking quando o id local não bate com o da nuvem */
+  segmentOrder?: number;
+  segmentName?: string;
+  segmentType?: 'run' | 'station';
 }
