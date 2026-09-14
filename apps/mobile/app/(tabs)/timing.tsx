@@ -25,6 +25,7 @@ import { useOrganizerStore } from '@/src/stores/organizerStore';
 import {
   assignedParticipantsForHeat,
   buildTimingParticipants,
+  isParticipantRaceStarted,
   type TimingParticipant,
 } from '@/src/utils/participantHelpers';
 import { formatMs, formatStatusLabel } from '@/src/utils/formatTime';
@@ -59,6 +60,7 @@ import {
   createHeatTimingRun,
   createJudgeStationWatchRun,
   createFinishedTimingRun,
+  ensureFinishSegmentTimes,
   finalizeRunIfCourseComplete,
   applySharedPauseToRun,
   getSegmentMs,
@@ -289,19 +291,7 @@ export default function TimingScreen() {
     const heats = selectedEvent?.heats ?? [];
     return participants.filter((p) => {
       if (p.status === 'finished' || p.status === 'dnf' || p.status === 'dns') return false;
-      if (!raceClock.startedAt) return false;
-      if (heats.length > 0) {
-        const inStartedHeat = heats.some(
-          (heat) =>
-            !!heat.startedAt &&
-            assignedParticipantsForHeat(participants, heat).some(
-              (assigned) => participantKey(assigned) === participantKey(p),
-            ),
-        );
-        if (!inStartedHeat) return false;
-      } else if (p.status !== 'racing' && !p.racingStartedAt && !runs[participantKey(p)]) {
-        return false;
-      }
+      if (!isParticipantRaceStarted(p, participants, heats, raceClock.startedAt)) return false;
       const key = participantKey(p);
       const run = runs[key];
       const startedAtMs =
@@ -455,15 +445,15 @@ export default function TimingScreen() {
               continue;
             }
             const heats = liveEvent?.heats ?? selectedEvent.heats ?? [];
-            if (heats.length > 0) {
-              const inStartedHeat = heats.some(
-                (heat) =>
-                  !!heat.startedAt &&
-                  assignedParticipantsForHeat(participants, heat).some(
-                    (p) => participantKey(p) === participantKey(participant),
-                  ),
-              );
-              if (!inStartedHeat) continue;
+            if (
+              !isParticipantRaceStarted(
+                participant,
+                participants,
+                heats,
+                liveClock.startedAt,
+              )
+            ) {
+              continue;
             }
             const key = participantKey(participant);
             const startedAtMs = next[key]?.raceStartedAt
@@ -868,31 +858,14 @@ export default function TimingScreen() {
 
   function ensureJudgeRun(participant: TimingParticipant): string {
     const key = participantKey(participant);
-    if (!raceClock.startedAt) {
+    const heats = selectedEvent?.heats ?? [];
+    if (!isParticipantRaceStarted(participant, participants, heats, raceClock.startedAt)) {
       Alert.alert(
         'Bateria não iniciada',
-        'Aguarde o organizador iniciar a bateria antes de apontar a estação.',
+        'Aguarde o organizador iniciar a bateria (ou o atleta) antes de apontar a estação.',
       );
       setActiveKey(key);
       return key;
-    }
-    const heats = selectedEvent?.heats ?? [];
-    if (heats.length > 0) {
-      const inStartedHeat = heats.some(
-        (heat) =>
-          !!heat.startedAt &&
-          assignedParticipantsForHeat(participants, heat).some(
-            (p) => participantKey(p) === key,
-          ),
-      );
-      if (!inStartedHeat) {
-        Alert.alert(
-          'Bateria não iniciada',
-          'Este atleta ainda não está em uma bateria iniciada pelo organizador.',
-        );
-        setActiveKey(key);
-        return key;
-      }
     }
     const startedAtMs =
       runs[key]?.raceStartedAt ??
@@ -1042,7 +1015,10 @@ export default function TimingScreen() {
   );
 
   function applyRunUpdate(key: string, nextRun: TimingRunState) {
-    const finalized = finalizeRunIfCourseComplete(nextRun, segments, now);
+    let finalized = finalizeRunIfCourseComplete(nextRun, segments, now);
+    if (finalized.raceComplete) {
+      finalized = ensureFinishSegmentTimes(finalized, segments, now);
+    }
     touchRun(key);
     setRuns((prev) => {
       const next = { ...prev, [key]: finalized };
@@ -1072,10 +1048,19 @@ export default function TimingScreen() {
   }
 
   function assertJudgeCanMark(): boolean {
-    if (!raceClock.startedAt) {
+    if (!activeRun) return false;
+    const heats = selectedEvent?.heats ?? [];
+    if (
+      !isParticipantRaceStarted(
+        activeRun.participant,
+        participants,
+        heats,
+        raceClock.startedAt,
+      )
+    ) {
       Alert.alert(
         'Bateria não iniciada',
-        'Aguarde o organizador iniciar a bateria antes de apontar a estação.',
+        'Aguarde o organizador iniciar a bateria (ou o atleta) antes de apontar a estação.',
       );
       return false;
     }
@@ -1085,23 +1070,6 @@ export default function TimingScreen() {
         'O organizador pausou o tempo total. Aguarde a retomada para apontar a estação.',
       );
       return false;
-    }
-    const heats = selectedEvent?.heats ?? [];
-    if (heats.length > 0 && activeRun) {
-      const inStartedHeat = heats.some(
-        (heat) =>
-          !!heat.startedAt &&
-          assignedParticipantsForHeat(participants, heat).some(
-            (p) => participantKey(p) === participantKey(activeRun.participant),
-          ),
-      );
-      if (!inStartedHeat) {
-        Alert.alert(
-          'Bateria não iniciada',
-          'Este atleta ainda não está em uma bateria iniciada pelo organizador.',
-        );
-        return false;
-      }
     }
     return true;
   }
@@ -1158,13 +1126,14 @@ export default function TimingScreen() {
   function saveRunToRanking(run: TimingRunState, goToBoard: boolean) {
     if (!isOrganizer || !eventId) return false;
     const { participant } = run;
-    const frozen = run.frozenTotalMs || getTotalMs(run, now);
+    const withSplits = ensureFinishSegmentTimes(run, segments, now);
+    const frozen = withSplits.frozenTotalMs || getTotalMs(withSplits, now);
     const result = recordParticipantFinish(
       eventId,
       participant.id,
       participant.type,
       frozen,
-      run.segmentTimes,
+      withSplits.segmentTimes,
     );
     if (!result.ok) {
       Alert.alert('Não foi possível salvar', result.reason);
@@ -1442,12 +1411,16 @@ export default function TimingScreen() {
                     variant="secondary"
                     onPress={() => {
                       if (!activeKey || !activeRun) return;
-                      const done = finalizeRunIfCourseComplete(
-                        {
-                          ...activeRun,
-                          completed: segments.map((_, idx) => idx),
-                          segmentIndex: segments.length,
-                        },
+                      const done = ensureFinishSegmentTimes(
+                        finalizeRunIfCourseComplete(
+                          {
+                            ...activeRun,
+                            completed: segments.map((_, idx) => idx),
+                            segmentIndex: segments.length,
+                          },
+                          segments,
+                          now,
+                        ),
                         segments,
                         now,
                       );

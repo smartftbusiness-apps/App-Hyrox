@@ -91,6 +91,31 @@ export function assignedParticipantsForHeat(
   });
 }
 
+/**
+ * Atleta pode ser cronometrado/apontado quando a prova já começou.
+ * Se estiver em alguma bateria, essa bateria precisa ter sido iniciada.
+ * Se não estiver em nenhuma (baterias vazias / só start avulso), basta o relógio da prova.
+ */
+export function isParticipantRaceStarted(
+  participant: TimingParticipant,
+  participants: TimingParticipant[],
+  heats: EventHeat[],
+  raceStartedAt: string | null | undefined,
+): boolean {
+  if (!raceStartedAt && !participant.racingStartedAt) return false;
+  if (!heats.length) return true;
+
+  const assignedHeats = heats.filter((heat) =>
+    assignedParticipantsForHeat(participants, heat).some(
+      (p) => participantKey(p) === participantKey(participant),
+    ),
+  );
+  if (assignedHeats.length === 0) {
+    return !!(raceStartedAt || participant.racingStartedAt);
+  }
+  return assignedHeats.some((heat) => !!heat.startedAt);
+}
+
 export function buildTimingParticipants(
   athletes: Athlete[],
   pairs: DoublesPair[],
