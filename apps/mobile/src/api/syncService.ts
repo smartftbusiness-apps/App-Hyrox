@@ -27,6 +27,10 @@ import { useEventsStore } from '@/src/stores/eventsStore';
 import { fetchAndApplyLiveRuns, broadcastCourseLayout } from '@/src/api/liveTimingRepository';
 import { fetchMyJudgeAssignments } from '@/src/api/staffRepository';
 import { dedupeEvents } from '@/src/utils/dedupeEvents';
+import {
+  buildTimingParticipants,
+  remapHeatRostersToLocalParticipants,
+} from '@/src/utils/participantHelpers';
 import { stationSegmentOptions } from '@/src/utils/stationTiming';
 
 type DbEvent = {
@@ -916,6 +920,25 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
   );
   useAthletesStore.setState({ athletes, pairs });
   await fetchAndApplyLiveRuns(localEventId);
+
+  const afterAthletes = useAthletesStore.getState();
+  const liveEvent = useEventsStore.getState().events.find((e) => e.id === localEventId);
+  if (liveEvent?.heats?.length) {
+    const localParticipants = buildTimingParticipants(
+      afterAthletes.athletes.filter((a) => a.eventId === localEventId),
+      afterAthletes.pairs.filter((p) => p.eventId === localEventId),
+      liveEvent.categories,
+    );
+    const remappedHeats = remapHeatRostersToLocalParticipants(
+      liveEvent.heats,
+      localParticipants,
+    );
+    useEventsStore.setState((state) => ({
+      events: state.events.map((e) =>
+        e.id === localEventId ? { ...e, heats: remappedHeats } : e,
+      ),
+    }));
+  }
 
   const rows = await fetchMyJudgeAssignments();
   const row = rows.find((r) => r.event_id === event.supabaseId);
