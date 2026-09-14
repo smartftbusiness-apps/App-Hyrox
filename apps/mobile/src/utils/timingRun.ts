@@ -200,6 +200,57 @@ export function isCourseFullyCompleted(
   return segments.every((_, idx) => run.completed.includes(idx));
 }
 
+/** Garante parciais no ranking ao finalizar (preenche segmentos faltantes). */
+export function ensureFinishSegmentTimes(
+  run: TimingRunState,
+  segments: Segment[],
+  now = Date.now(),
+): TimingRunState {
+  if (!segments.length) return run;
+  const totalMs = run.raceComplete
+    ? run.frozenTotalMs || getTotalMs({ ...run, raceComplete: false }, now)
+    : getTotalMs(run, now);
+
+  let segmentTimes = [...run.segmentTimes];
+  for (const seg of segments) {
+    if (!segmentTimes.some((st) => st.segmentId === seg.id)) {
+      segmentTimes = upsertAnnotatedSegmentTime(segmentTimes, seg.id, 0, segments);
+    }
+  }
+
+  const positive = segmentTimes.filter((st) => st.durationMs > 0);
+  if (positive.length === 0 && totalMs > 0) {
+    // Sem apontamentos: distribui o tempo total pelas estações para o ranking.
+    const base = Math.floor(totalMs / segments.length);
+    let leftover = totalMs - base * segments.length;
+    segmentTimes = segments.map((seg, idx) => {
+      const extra = idx === segments.length - 1 ? leftover : 0;
+      return annotateSegmentTime(seg.id, base + extra, segments);
+    });
+  } else if (positive.length > 0) {
+    const recorded = positive.reduce((sum, st) => sum + st.durationMs, 0);
+    const remaining = Math.max(0, totalMs - recorded);
+    if (remaining > 0) {
+      const open = segments.find(
+        (seg) => !segmentTimes.some((st) => st.segmentId === seg.id && st.durationMs > 0),
+      );
+      if (open) {
+        segmentTimes = upsertAnnotatedSegmentTime(segmentTimes, open.id, remaining, segments);
+      } else {
+        const last = positive[positive.length - 1];
+        segmentTimes = upsertAnnotatedSegmentTime(
+          segmentTimes,
+          last.segmentId,
+          last.durationMs + remaining,
+          segments,
+        );
+      }
+    }
+  }
+
+  return { ...run, segmentTimes };
+}
+
 /** Congela o cronômetro quando todos os segmentos da prova foram concluídos. */
 export function finalizeRunIfCourseComplete(
   run: TimingRunState,

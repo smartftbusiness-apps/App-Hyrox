@@ -255,7 +255,25 @@ function mergeAthletesAfterPull(
     const dbId = resolveDbId(remote);
     const existing = dbId ? localBySupabaseId.get(dbId) : undefined;
     if (existing) {
-      return { ...remote, id: existing.id, pairId: existing.pairId ?? remote.pairId };
+      const remoteSplits = remote.segmentTimes?.length ?? 0;
+      const localSplits = existing.segmentTimes?.length ?? 0;
+      const keepLocalSplits =
+        localSplits > remoteSplits ||
+        (localSplits > 0 &&
+          remoteSplits > 0 &&
+          (existing.segmentTimes ?? []).filter((s) => s.durationMs > 0).length >
+            (remote.segmentTimes ?? []).filter((s) => s.durationMs > 0).length);
+      return {
+        ...remote,
+        id: existing.id,
+        pairId: existing.pairId ?? remote.pairId,
+        totalMs: remote.totalMs ?? existing.totalMs,
+        segmentTimes: keepLocalSplits ? existing.segmentTimes : remote.segmentTimes,
+        status: (existing.status === 'finished' || remote.status === 'finished'
+          ? 'finished'
+          : remote.status) as AthleteStatus,
+        racingStartedAt: remote.racingStartedAt ?? existing.racingStartedAt,
+      } satisfies Athlete;
     }
     return remote;
   });
@@ -315,7 +333,27 @@ function mergePairsAfterPull(
   const mergedRemote = remappedRemote.map((remote) => {
     const dbId = resolveDbId(remote);
     const existing = dbId ? localBySupabaseId.get(dbId) : undefined;
-    return existing ? { ...remote, id: existing.id } : remote;
+    if (existing) {
+      const remoteSplits = remote.segmentTimes?.length ?? 0;
+      const localSplits = existing.segmentTimes?.length ?? 0;
+      const keepLocalSplits =
+        localSplits > remoteSplits ||
+        (localSplits > 0 &&
+          remoteSplits > 0 &&
+          (existing.segmentTimes ?? []).filter((s) => s.durationMs > 0).length >
+            (remote.segmentTimes ?? []).filter((s) => s.durationMs > 0).length);
+      return {
+        ...remote,
+        id: existing.id,
+        totalMs: remote.totalMs ?? existing.totalMs,
+        segmentTimes: keepLocalSplits ? existing.segmentTimes : remote.segmentTimes,
+        status: (existing.status === 'finished' || remote.status === 'finished'
+          ? 'finished'
+          : remote.status) as AthleteStatus,
+        racingStartedAt: remote.racingStartedAt ?? existing.racingStartedAt,
+      } satisfies DoublesPair;
+    }
+    return remote;
   });
 
   const remoteDbIds = new Set(
