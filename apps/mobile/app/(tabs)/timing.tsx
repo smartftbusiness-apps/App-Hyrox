@@ -26,6 +26,7 @@ import {
   assignedParticipantsForHeat,
   buildTimingParticipants,
   isParticipantRaceStarted,
+  remapHeatRostersToLocalParticipants,
   type TimingParticipant,
 } from '@/src/utils/participantHelpers';
 import { formatMs, formatStatusLabel } from '@/src/utils/formatTime';
@@ -613,16 +614,23 @@ export default function TimingScreen() {
               if (event.id !== selectedEvent.id && event.supabaseId !== selectedEvent.supabaseId) {
                 return event;
               }
+              const nextSegments = layoutSegments.map((s, idx) => ({
+                id: `${event.id}-seg-${String(s.order ?? idx + 1).padStart(2, '0')}`,
+                order: s.order,
+                type: s.type,
+                name: s.name,
+                target: s.target,
+              }));
+              const athleteState = useAthletesStore.getState();
+              const localParticipants = buildTimingParticipants(
+                athleteState.athletes.filter((a) => a.eventId === event.id),
+                athleteState.pairs.filter((p) => p.eventId === event.id),
+                event.categories,
+              );
               return {
                 ...event,
-                segments: layoutSegments.map((s, idx) => ({
-                  id: `${event.id}-seg-${String(s.order ?? idx + 1).padStart(2, '0')}`,
-                  order: s.order,
-                  type: s.type,
-                  name: s.name,
-                  target: s.target,
-                })),
-                heats,
+                segments: nextSegments,
+                heats: remapHeatRostersToLocalParticipants(heats, localParticipants),
                 courseLayoutSynced: true,
               };
             }),
@@ -1644,14 +1652,13 @@ export default function TimingScreen() {
           </Text>
           {judgeRosterParticipants.length === 0 ? (
             <Text style={styles.empty}>
-              {!raceClock.startedAt
-                ? 'Aguarde o organizador iniciar a bateria. Só então os atletas aparecem para apontamento.'
-                : (selectedEvent?.heats?.length ?? 0) > 0 &&
-                    !(selectedEvent?.heats ?? []).some((h) => h.startedAt)
-                  ? 'Nenhuma bateria iniciada ainda. Aguarde o organizador.'
-                  : participants.length === 0
-                    ? 'Nenhum atleta inscrito neste evento ainda.'
-                    : 'Todos os atletas desta estação já foram apontados.'}
+              {participants.length === 0
+                ? 'Nenhum atleta sincronizado neste evento. Puxe para atualizar na aba Eventos ou peça ao organizador para salvar o evento na nuvem.'
+                : !raceClock.startedAt &&
+                    !(selectedEvent?.heats ?? []).some((h) => h.startedAt) &&
+                    !participants.some((p) => p.status === 'racing' || !!p.racingStartedAt)
+                  ? 'Aguarde o organizador iniciar a bateria ou o atleta.'
+                  : 'Todos os atletas desta estação já foram apontados.'}
             </Text>
           ) : (
             judgeRosterParticipants.map((p) => {
