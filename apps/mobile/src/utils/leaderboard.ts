@@ -20,24 +20,60 @@ export type LeaderboardRow = {
   splits: LeaderboardSplit[];
 };
 
+function orderFromSegmentId(segmentId: string): number | null {
+  const match = segmentId.match(/-seg-(\d+)$/i) ?? segmentId.match(/^s(\d+)$/i);
+  if (!match) return null;
+  const order = Number(match[1]);
+  return Number.isFinite(order) && order > 0 ? order : null;
+}
+
+function resolveSegment(
+  st: SegmentTime,
+  segments: Segment[],
+  fallbackIndex: number,
+): Segment | undefined {
+  const byId = segments.find((s) => s.id === st.segmentId);
+  if (byId) return byId;
+
+  if (st.segmentOrder != null && st.segmentOrder > 0) {
+    const byStoredOrder = segments.find((s) => s.order === st.segmentOrder);
+    if (byStoredOrder) return byStoredOrder;
+  }
+
+  const parsedOrder = orderFromSegmentId(st.segmentId);
+  if (parsedOrder != null) {
+    const byOrder = segments.find((s) => s.order === parsedOrder);
+    if (byOrder) return byOrder;
+  }
+
+  return segments[fallbackIndex];
+}
+
 export function buildSplits(
   segmentTimes: SegmentTime[] | undefined,
   segments: Segment[],
 ): LeaderboardSplit[] {
-  if (!segmentTimes?.length || !segments.length) return [];
-  const byId = new Map(segments.map((s) => [s.id, s]));
-  return segmentTimes
-    .map((st) => {
-      const seg = byId.get(st.segmentId);
+  if (!segmentTimes?.length) return [];
+
+  const withDuration = segmentTimes.filter((st) => st.durationMs > 0);
+  if (!withDuration.length) return [];
+
+  return withDuration
+    .map((st, idx) => {
+      const seg = segments.length ? resolveSegment(st, segments, idx) : undefined;
+      const segmentOrder =
+        seg?.order ??
+        st.segmentOrder ??
+        orderFromSegmentId(st.segmentId) ??
+        idx + 1;
       return {
-        segmentId: st.segmentId,
-        segmentName: seg?.name ?? 'Segmento',
-        segmentOrder: seg?.order ?? 0,
-        segmentType: seg?.type ?? 'station',
+        segmentId: st.segmentId || `split-${segmentOrder}`,
+        segmentName: seg?.name ?? st.segmentName ?? `Segmento ${segmentOrder}`,
+        segmentOrder,
+        segmentType: seg?.type ?? st.segmentType ?? 'station',
         durationMs: st.durationMs,
       };
     })
-    .filter((s) => s.durationMs > 0)
     .sort((a, b) => a.segmentOrder - b.segmentOrder);
 }
 

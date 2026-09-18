@@ -14,7 +14,12 @@ import { HyroxTheme } from '@/constants/Theme';
 
 import { APP_ROLE_LABELS } from '@/src/domain/appRole';
 
-import { pullAndMergeAthleteEvents, pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
+import { isJudgeAssignedToEvent } from '@/src/utils/judgeAssignment';
+import {
+  pullAndMergeAthleteEvents,
+  pullAndMergeFromSupabase,
+  pullAndMergeJudgeEvents,
+} from '@/src/api/syncService';
 
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 
@@ -96,6 +101,7 @@ export default function EventsScreen() {
   const isAthlete = useIsAthleteMode();
 
   const assignedEventIds = useEventStaffStore((s) => s.assignedEventIds);
+  const judgeStations = useEventStaffStore((s) => s.judgeStationByEvent);
 
   const appRole = useAccessModeStore((s) => s.appRole);
 
@@ -121,13 +127,36 @@ export default function EventsScreen() {
 
   const displayedEvents = useMemo(() => {
     if (isJudge) {
-      return events.filter((e) => assignedEventIds.includes(e.id));
+      return events.filter((e) =>
+        isJudgeAssignedToEvent(e, assignedEventIds, judgeStations),
+      );
     }
     if (isAthlete) {
       return events.filter((e) => participatingEventIds.has(e.id));
     }
     return events;
-  }, [events, isJudge, isAthlete, assignedEventIds, participatingEventIds]);
+  }, [events, isJudge, isAthlete, assignedEventIds, judgeStations, participatingEventIds]);
+
+  const activeEvents = useMemo(
+    () =>
+      displayedEvents
+        .filter((e) => e.status !== 'finished')
+        .sort((a, b) => {
+          const rank = (status: string) =>
+            status === 'live' ? 0 : status === 'open' ? 1 : 2;
+          const byStatus = rank(a.status) - rank(b.status);
+          if (byStatus !== 0) return byStatus;
+          return b.date.localeCompare(a.date);
+        }),
+    [displayedEvents],
+  );
+  const finishedEvents = useMemo(
+    () =>
+      displayedEvents
+        .filter((e) => e.status === 'finished')
+        .sort((a, b) => b.date.localeCompare(a.date)),
+    [displayedEvents],
+  );
 
 
 
@@ -356,74 +385,66 @@ export default function EventsScreen() {
 
 
       <Text style={styles.sectionTitle}>
-
-        {isJudge ? 'Meus eventos' : 'Próximos e ativos'}
-
+        {isJudge ? 'Meus eventos ativos' : 'Eventos ativos'}
       </Text>
 
-
-
       {displayedEvents.length === 0 ? (
-
         <Card
-
           title="Nenhum evento aqui"
-
           subtitle={
-
             isJudge
-
               ? user
-
                 ? 'Peça ao organizador para te designar como juiz e sincronize.'
-
                 : 'Faça login como juiz.'
-
               : user
-
                 ? 'Crie um evento ou sincronize com a nuvem'
-
                 : 'Crie eventos localmente ou faça login'
-
           }
-
         />
-
       ) : null}
 
+      {activeEvents.length === 0 && displayedEvents.length > 0 ? (
+        <Text style={styles.emptyList}>Nenhum evento ativo no momento.</Text>
+      ) : null}
 
-
-      {displayedEvents.map((event) => (
-
+      {activeEvents.map((event) => (
         <Card
-
           key={event.id}
-
           title={event.name}
-
           subtitle={`${event.location} · ${new Date(event.date).toLocaleDateString('pt-BR')}`}
-
           badge={STATUS_LABELS[event.status]}
-
           badgeColor={STATUS_COLORS[event.status] + '33'}
-
           onPress={() => router.push(`/event/${event.id}`)}>
-
           <View style={styles.cardFooter}>
-
             <Text style={styles.footerText}>
-
               {allAthletes.filter((a) => a.eventId === event.id).length} atletas
-
             </Text>
-
             <Text style={styles.footerText}>{event.categories.length} categorias</Text>
-
           </View>
-
         </Card>
-
       ))}
+
+      {finishedEvents.length > 0 ? (
+        <>
+          <Text style={[styles.sectionTitle, styles.sectionTitleSpaced]}>Eventos encerrados</Text>
+          {finishedEvents.map((event) => (
+            <Card
+              key={event.id}
+              title={event.name}
+              subtitle={`${event.location} · ${new Date(event.date).toLocaleDateString('pt-BR')}`}
+              badge={STATUS_LABELS[event.status]}
+              badgeColor={STATUS_COLORS[event.status] + '33'}
+              onPress={() => router.push(`/event/${event.id}`)}>
+              <View style={styles.cardFooter}>
+                <Text style={styles.footerText}>
+                  {allAthletes.filter((a) => a.eventId === event.id).length} atletas
+                </Text>
+                <Text style={styles.footerText}>Encerrado</Text>
+              </View>
+            </Card>
+          ))}
+        </>
+      ) : null}
 
 
 
@@ -503,6 +524,14 @@ const styles = StyleSheet.create({
 
     marginBottom: 12,
 
+  },
+
+  sectionTitleSpaced: { marginTop: 20 },
+
+  emptyList: {
+    color: HyroxTheme.textMuted,
+    fontSize: 14,
+    marginBottom: 16,
   },
 
   cardFooter: {

@@ -257,7 +257,9 @@ export default function EventDetailScreen() {
           <Button
             label="Abrir cronômetro"
             variant="primary"
-            onPress={() => router.push('/(tabs)/timing')}
+            onPress={() =>
+              router.push(`/(tabs)/timing?eventId=${encodeURIComponent(eventId)}`)
+            }
             style={{ marginBottom: 16 }}
           />
         )}
@@ -305,7 +307,9 @@ export default function EventDetailScreen() {
             <Button
               label="Abrir cronômetro da estação"
               variant="primary"
-              onPress={() => router.push('/(tabs)/timing')}
+              onPress={() =>
+                router.push(`/(tabs)/timing?eventId=${encodeURIComponent(eventId)}`)
+              }
               style={{ marginBottom: 16 }}
             />
           </>
@@ -364,25 +368,43 @@ export default function EventDetailScreen() {
                   <Text style={styles.participantCatTitle}>
                     {getCategoryDisplayName(category)} · {genderLabel(category.gender)}
                   </Text>
-                  {participants.map((p) =>
-                    p.kind === 'pair' ? (
+                  {participants.map((p) => {
+                    const key = `${p.kind}:${p.id}`;
+                    const athleteRow =
+                      p.kind === 'athlete'
+                        ? athletes.find((a) => a.id === p.id)
+                        : pairs.find((pair) => pair.id === p.id);
+                    const timeLabel =
+                      p.status === 'finished' && athleteRow?.totalMs != null
+                        ? ` · ${formatMs(athleteRow.totalMs)}`
+                        : p.status === 'racing'
+                          ? ' · Em prova — toque para ver'
+                          : p.status === 'finished'
+                            ? ' · Toque para ver o tempo'
+                            : '';
+                    return p.kind === 'pair' ? (
                       <Card
                         key={p.id}
                         title={`#${p.bib} ${p.label}`}
-                        subtitle={`Dupla · ${p.memberNames.join(' + ')}`}
+                        subtitle={`Dupla · ${p.memberNames.join(' + ')}${timeLabel}`}
                         badge={
                           p.status === 'racing'
                             ? 'Em prova'
                             : p.status === 'finished'
                               ? 'Finalizado'
                               : undefined
+                        }
+                        onPress={() =>
+                          router.push(
+                            `/(tabs)/timing?eventId=${encodeURIComponent(eventId)}&participantKey=${encodeURIComponent(key)}`,
+                          )
                         }
                       />
                     ) : (
                       <Card
                         key={p.id}
                         title={p.bib > 0 ? `#${p.bib} ${p.name}` : p.name}
-                        subtitle={p.bib > 0 ? 'Individual' : 'Aguardando dupla'}
+                        subtitle={`${p.bib > 0 ? 'Individual' : 'Aguardando dupla'}${timeLabel}`}
                         badge={
                           p.status === 'racing'
                             ? 'Em prova'
@@ -390,9 +412,14 @@ export default function EventDetailScreen() {
                               ? 'Finalizado'
                               : undefined
                         }
+                        onPress={() =>
+                          router.push(
+                            `/(tabs)/timing?eventId=${encodeURIComponent(eventId)}&participantKey=${encodeURIComponent(key)}`,
+                          )
+                        }
                       />
-                    ),
-                  )}
+                    );
+                  })}
                 </View>
               ))
             )}
@@ -452,7 +479,7 @@ export default function EventDetailScreen() {
             />
           )}
         </View>
-        {event.segments.slice(0, 5).map((seg) => (
+        {event.segments.map((seg) => (
           <View key={seg.id} style={styles.segmentRow}>
             <Text style={styles.segmentOrder}>{seg.order}</Text>
             <View style={styles.segmentInfo}>
@@ -464,10 +491,6 @@ export default function EventDetailScreen() {
             </View>
           </View>
         ))}
-        {event.segments.length > 5 && canEdit && (
-          <Text style={styles.moreText}>Ver todos em Gerenciar →</Text>
-        )}
-
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Baterias ({heats.length})</Text>
           {canEdit && (

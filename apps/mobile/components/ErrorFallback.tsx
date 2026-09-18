@@ -1,9 +1,19 @@
 import { type ErrorBoundaryProps } from 'expo-router';
+import { useEffect, useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { Button } from '@/components/ui/Button';
 import { HyroxTheme } from '@/constants/Theme';
 
 export function ErrorFallback({ error, retry }: ErrorBoundaryProps) {
+  const retried = useRef(false);
+  useEffect(() => {
+    if (retried.current) return;
+    if (!error.message?.includes("cannot add 'postgres_changes'")) return;
+    retried.current = true;
+    const timer = setTimeout(() => retry(), 250);
+    return () => clearTimeout(timer);
+  }, [error.message, retry]);
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Algo deu errado</Text>

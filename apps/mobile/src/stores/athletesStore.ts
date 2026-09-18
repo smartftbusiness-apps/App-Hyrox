@@ -354,10 +354,33 @@ export const useAthletesStore = create<AthletesState>()(
         return { ok: true };
       },
       recordParticipantFinish: (eventId, participantId, type, totalMs, segmentTimes = []) => {
-        const auth = assertEventAllowsTiming(eventId);
-        if (!auth.ok) return auth;
+        const event = useEventsStore.getState().events.find((e) => e.id === eventId);
+        if (!event) return { ok: false, reason: 'Evento não encontrado' };
+        if (event.status === 'draft') {
+          return { ok: false, reason: 'Abra inscrições ou coloque o evento ao vivo para cronometrar' };
+        }
+        const owner = useOrganizerStore.getState().isEventOwner(event.organizerId);
+        const judge = useEventStaffStore.getState().isAssignedJudge(eventId);
+        if (!owner && !judge) {
+          return { ok: false, reason: 'Sem permissão para cronometrar este evento' };
+        }
         if (totalMs < 0) return { ok: false, reason: 'Tempo inválido' };
-        const splits = segmentTimes ?? [];
+        const eventSegments = event.segments ?? [];
+        const splits = (segmentTimes ?? []).map((st, idx) => {
+          const seg =
+            eventSegments.find((s) => s.id === st.segmentId) ??
+            (st.segmentOrder != null
+              ? eventSegments.find((s) => s.order === st.segmentOrder)
+              : undefined) ??
+            eventSegments[idx];
+          return {
+            ...st,
+            segmentOrder: st.segmentOrder ?? seg?.order,
+            segmentName: st.segmentName ?? seg?.name,
+            segmentType: st.segmentType ?? seg?.type,
+            segmentId: seg?.id ?? st.segmentId,
+          };
+        });
 
         if (type === 'athlete') {
           const athlete = get().athletes.find((a) => a.id === participantId && a.eventId === eventId);

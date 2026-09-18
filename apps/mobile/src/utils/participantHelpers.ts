@@ -43,23 +43,7 @@ export function participantsForHeat(
   participants: TimingParticipant[],
   heat: EventHeat,
 ): TimingParticipant[] {
-  const keys = heat.participantKeys ?? [];
-  if (keys.length > 0) {
-    const set = new Set(keys);
-    return participants.filter((p) => set.has(participantKey(p)) && p.status !== 'finished');
-  }
-  return participants.filter((p) => {
-    if (heat.categoryIds.length > 0 && !heat.categoryIds.includes(p.categoryId)) {
-      return false;
-    }
-    if (heat.bibNumbers.length > 0 && !heat.bibNumbers.includes(p.bib)) {
-      return false;
-    }
-    if (heat.categoryIds.length === 0 && heat.bibNumbers.length === 0) {
-      return false;
-    }
-    return p.status !== 'finished';
-  });
+  return assignedParticipantsForHeat(participants, heat).filter((p) => p.status !== 'finished');
 }
 
 export function findHeatWithParticipant(
@@ -81,13 +65,80 @@ export function assignedParticipantsForHeat(
   const keys = heat.participantKeys ?? [];
   if (keys.length > 0) {
     const set = new Set(keys);
-    return participants.filter((p) => set.has(participantKey(p)));
+    const byKey = participants.filter((p) => set.has(participantKey(p)));
+    // Keys vêm do aparelho do organizador; no juiz costumam não bater — cai no bib.
+    if (byKey.length > 0) return byKey;
   }
-  return participants.filter((p) => {
-    if (heat.categoryIds.length > 0 && !heat.categoryIds.includes(p.categoryId)) return false;
-    if (heat.bibNumbers.length > 0 && !heat.bibNumbers.includes(p.bib)) return false;
-    if (heat.categoryIds.length === 0 && heat.bibNumbers.length === 0) return false;
-    return true;
+  if ((heat.bibNumbers?.length ?? 0) > 0) {
+    return participants.filter((p) => heat.bibNumbers.includes(p.bib));
+  }
+  if ((heat.categoryIds?.length ?? 0) > 0) {
+    return participants.filter((p) => heat.categoryIds.includes(p.categoryId));
+  }
+  return [];
+}
+
+/**
+ * Atleta pode ser apontado pelo juiz quando a prova já está em andamento.
+ * Relógio global ou atleta em racing liberam sempre.
+ * Sem relógio global, exige bateria iniciada (match por bib quando as keys locais falham).
+ */
+export function isParticipantRaceStarted(
+  participant: TimingParticipant,
+  participants: TimingParticipant[],
+  heats: EventHeat[],
+  raceStartedAt: string | null | undefined,
+): boolean {
+  if (participant.status === 'racing' || !!participant.racingStartedAt) return true;
+  if (raceStartedAt) return true;
+  if (!heats.length) return false;
+
+  const assignedHeats = heats.filter((heat) =>
+    assignedParticipantsForHeat(participants, heat).some(
+      (p) => participantKey(p) === participantKey(participant),
+    ),
+  );
+  if (assignedHeats.length > 0) {
+    return assignedHeats.some((heat) => !!heat.startedAt);
+  }
+  return heats.some((heat) => !!heat.startedAt);
+}
+
+/**
+ * Start real do atleta: racingStartedAt → bateria dele → nunca o relógio antigo do evento.
+ * (Usar raceClock.startedAt de uma bateria anterior fazia o tempo “já estar rodando”.)
+ */
+export function resolveAthleteRaceStartedAt(
+  participant: TimingParticipant,
+  participants: TimingParticipant[],
+  heats: EventHeat[],
+): string | undefined {
+  if (participant.racingStartedAt) return participant.racingStartedAt;
+  const assignedHeats = heats.filter((heat) =>
+    assignedParticipantsForHeat(participants, heat).some(
+      (p) => participantKey(p) === participantKey(participant),
+    ),
+  );
+  for (const heat of assignedHeats) {
+    if (heat.startedAt) return heat.startedAt;
+  }
+  return undefined;
+}
+
+/** Reescreve participantKeys das baterias com os ids locais (por bib). */
+export function remapHeatRostersToLocalParticipants(
+  heats: EventHeat[],
+  participants: TimingParticipant[],
+): EventHeat[] {
+  if (!heats.length || !participants.length) return heats;
+  return heats.map((heat) => {
+    const assigned = assignedParticipantsForHeat(participants, heat);
+    if (!assigned.length) return heat;
+    return {
+      ...heat,
+      participantKeys: assigned.map((p) => participantKey(p)),
+      bibNumbers: assigned.map((p) => p.bib),
+    };
   });
 }
 
