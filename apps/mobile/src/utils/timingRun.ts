@@ -147,18 +147,28 @@ export function isTotalTimePaused(run: TimingRunState): boolean {
   return run.totalPausedAt != null && !run.raceComplete;
 }
 
-/** Alinha um cronômetro local ao relógio compartilhado do organizador. */
+/** Alinha um cronômetro local ao relógio compartilhado do organizador.
+ *  Só herda o start do evento se o atleta realmente partilhou o mesmo start (±2,5s).
+ *  Caso contrário, preserva o start individual (evita tempo negativo / “já rodando”).
+ */
 export function applySharedClockToRun(
   run: TimingRunState,
   clock: SharedRaceClock,
 ): TimingRunState {
-  if (!clock.startedAt) return run;
-  const raceStartedAt = new Date(clock.startedAt).getTime();
-  if (!Number.isFinite(raceStartedAt)) return run;
+  if (run.raceComplete) return run;
+  if (!clock.startedAt) return applySharedPauseToRun(run, clock);
+  const clockStartedAt = new Date(clock.startedAt).getTime();
+  if (!Number.isFinite(clockStartedAt)) return applySharedPauseToRun(run, clock);
+
+  const sharesEventStart = Math.abs(run.raceStartedAt - clockStartedAt) < 2500;
+  if (!sharesEventStart) {
+    return applySharedPauseToRun(run, clock);
+  }
+
   const totalPausedAt = clock.pausedAt ? new Date(clock.pausedAt).getTime() : null;
   const totalPauseAccumMs = clock.pauseAccumMs ?? 0;
   if (
-    run.raceStartedAt === raceStartedAt &&
+    run.raceStartedAt === clockStartedAt &&
     run.totalPausedAt === totalPausedAt &&
     run.totalPauseAccumMs === totalPauseAccumMs
   ) {
@@ -166,19 +176,49 @@ export function applySharedClockToRun(
   }
   return {
     ...run,
-    raceStartedAt,
+    raceStartedAt: clockStartedAt,
     totalPausedAt,
     totalPauseAccumMs,
   };
 }
 
-/** Aplica só pausa/retomada, sem mudar o start individual da prova. */
+/** Aplica pausa/retomada compartilhada sem estragar o start individual do atleta. */
 export function applySharedPauseToRun(
   run: TimingRunState,
   clock: SharedRaceClock,
 ): TimingRunState {
   if (run.raceComplete) return run;
   const totalPausedAt = clock.pausedAt ? new Date(clock.pausedAt).getTime() : null;
+  const clockStartedAt = clock.startedAt ? new Date(clock.startedAt).getTime() : NaN;
+  const sharesEventStart =
+    Number.isFinite(clockStartedAt) && Math.abs(run.raceStartedAt - clockStartedAt) < 2500;
+
+  // Atleta com start próprio: só congela/retoma, não herda pauseAccum do evento.
+  if (!sharesEventStart) {
+    if (totalPausedAt != null) {
+      if (run.totalPausedAt != null) return run;
+      const pausedAt = Math.max(totalPausedAt, run.raceStartedAt);
+      return {
+        ...run,
+        totalPausedAt: pausedAt,
+        segmentStartedAt: run.segmentStartedAt != null ? null : run.segmentStartedAt,
+        segmentBaseMs:
+          run.segmentStartedAt != null
+            ? run.segmentBaseMs + Math.max(0, pausedAt - run.segmentStartedAt)
+            : run.segmentBaseMs,
+      };
+    }
+    if (run.totalPausedAt != null) {
+      const pauseDuration = Math.max(0, Date.now() - run.totalPausedAt);
+      return {
+        ...run,
+        totalPauseAccumMs: run.totalPauseAccumMs + pauseDuration,
+        totalPausedAt: null,
+      };
+    }
+    return run;
+  }
+
   const totalPauseAccumMs = clock.pauseAccumMs ?? 0;
   if (run.totalPausedAt === totalPausedAt && run.totalPauseAccumMs === totalPauseAccumMs) {
     return run;
@@ -284,9 +324,11 @@ export function finalizeRunIfCourseComplete(
 }
 
 export function getTotalMs(run: TimingRunState, now: number): number {
-  if (run.raceComplete) return run.frozenTotalMs;
+  if (run.raceComplete) return Math.max(0, run.frozenTotalMs);
   const clockNow = run.totalPausedAt ?? now;
-  return clockNow - run.raceStartedAt - run.totalPauseAccumMs + run.penaltiesMs;
+  const elapsed =
+    clockNow - run.raceStartedAt - run.totalPauseAccumMs + run.penaltiesMs;
+  return Math.max(0, elapsed);
 }
 
 export function isSegmentRunning(run: TimingRunState): boolean {

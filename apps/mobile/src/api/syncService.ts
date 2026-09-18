@@ -116,6 +116,27 @@ type DbPairSegmentTime = {
 
 const syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+function mergeHeats(
+  remote: HyroxEvent['heats'],
+  local: HyroxEvent['heats'],
+): HyroxEvent['heats'] {
+  if (!remote?.length) return local;
+  if (!local?.length) return remote;
+  const localById = new Map(local.map((h) => [h.id, h]));
+  return remote.map((rh) => {
+    const lh = localById.get(rh.id);
+    if (!lh) return rh;
+    return {
+      ...lh,
+      ...rh,
+      startedAt: rh.startedAt ?? lh.startedAt,
+      bibNumbers: rh.bibNumbers?.length ? rh.bibNumbers : lh.bibNumbers,
+      participantKeys: rh.participantKeys?.length ? rh.participantKeys : lh.participantKeys,
+      categoryIds: rh.categoryIds?.length ? rh.categoryIds : lh.categoryIds,
+    };
+  });
+}
+
 function mergeEventsLocalRemote(remote: HyroxEvent, existing: HyroxEvent): HyroxEvent {
   const categoryBySupabase = new Map(
     existing.categories.filter((c) => c.supabaseId).map((c) => [c.supabaseId!, c]),
@@ -135,12 +156,8 @@ function mergeEventsLocalRemote(remote: HyroxEvent, existing: HyroxEvent): Hyrox
         ? existing.segments
         : remote.segments;
   const heats = remoteHasCustomCourse
-    ? remote.heats
-    : localHasCustomCourse && existing.heats?.length
-      ? existing.heats
-      : existing.heats?.length
-        ? existing.heats
-        : remote.heats;
+    ? mergeHeats(remote.heats, existing.heats)
+    : mergeHeats(remote.heats, existing.heats) ?? existing.heats ?? remote.heats;
 
   return {
     ...remote,
@@ -694,9 +711,10 @@ export async function pullJudgeAssignedData(userId: string): Promise<{
   athletes: Athlete[];
   pairs: DoublesPair[];
   assignedLocalIds: string[];
+  assignedDbIds: string[];
 }> {
   if (!isSupabaseConfigured()) {
-    return { events: [], athletes: [], pairs: [], assignedLocalIds: [] };
+    return { events: [], athletes: [], pairs: [], assignedLocalIds: [], assignedDbIds: [] };
   }
 
   let eventDbIds: string[] = [];
@@ -717,21 +735,33 @@ export async function pullJudgeAssignedData(userId: string): Promise<{
     eventDbIds = [...new Set((staffRows ?? []).map((r) => r.event_id as string))];
   }
   if (!eventDbIds.length) {
-    return { events: [], athletes: [], pairs: [], assignedLocalIds: [] };
+    return { events: [], athletes: [], pairs: [], assignedLocalIds: [], assignedDbIds: [] };
   }
 
-  const { data: eventRows, error: eventsError } = await getSupabase()
+  const full = await getSupabase()
     .from('events')
-    .select('id, organizer_id, name, event_date, location, status')
+    .select(
+      'id, organizer_id, name, event_date, location, status, race_started_at, race_paused_at, race_pause_accum_ms, live_station_progress, course_layout',
+    )
     .in('id', eventDbIds)
     .order('event_date', { ascending: false });
+  const fallback = full.error
+    ? await getSupabase()
+        .from('events')
+        .select(
+          'id, organizer_id, name, event_date, location, status, race_started_at, race_paused_at, race_pause_accum_ms',
+        )
+        .in('id', eventDbIds)
+        .order('event_date', { ascending: false })
+    : full;
 
-  if (eventsError) throw new Error(eventsError.message);
+  if (fallback.error) throw new Error(fallback.error.message);
 
-  const bundle = await loadBundleFromDbEvents((eventRows ?? []) as DbEvent[]);
+  const bundle = await loadBundleFromDbEvents((fallback.data ?? []) as DbEvent[]);
   return {
     ...bundle,
     assignedLocalIds: bundle.events.map((e) => e.id),
+    assignedDbIds: eventDbIds,
   };
 }
 
@@ -832,22 +862,25 @@ export async function pullAndMergeAthleteEvents(userEmail: string): Promise<Athl
 
 async function syncJudgeStationAssignments(events: HyroxEvent[]): Promise<void> {
   const rows = await fetchMyJudgeAssignments();
-  const bySupabaseId = new Map(events.map((e) => [e.supabaseId!, e.id]));
   const assignments: Record<string, number | null> = {};
 
   for (const event of events) {
     if (!event.supabaseId) continue;
     const row = rows.find((r) => r.event_id === event.supabaseId);
     assignments[event.id] = row?.station_order ?? null;
+    // Também indexa pelo id da nuvem para lookups alternativos
+    assignments[event.supabaseId] = row?.station_order ?? null;
   }
 
-  if (Object.keys(assignments).length) {
-    useEventStaffStore.getState().setJudgeStations(assignments);
-  }
+  useEventStaffStore.getState().setJudgeStations(assignments);
 }
 
 /** Sincroniza evento ao vivo para o juiz: status, atletas, estação designada e cronômetros. */
-export async function syncJudgeEventLive(localEventId: string): Promise<void> {
+export async function syncJudgeEventLive(
+  localEventId: string,
+  options: { full?: boolean } = {},
+): Promise<void> {
+  const fullSync = options.full !== false;
   const event = useEventsStore.getState().events.find((e) => e.id === localEventId);
   if (!event?.supabaseId || !isSupabaseConfigured()) return;
 
@@ -870,7 +903,19 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
   const data = fallback.data;
   if (fallback.error || !data) return;
 
-  const clock = await fetchEventRaceClock(event.supabaseId);
+  // Preferir colunas já trazidas no select (evita 2ª query de clock).
+  const clock = {
+    startedAt:
+      'race_started_at' in data
+        ? ((data.race_started_at as string | null) ?? null)
+        : (await fetchEventRaceClock(event.supabaseId)).startedAt,
+    pausedAt:
+      'race_paused_at' in data
+        ? ((data.race_paused_at as string | null) ?? null)
+        : null,
+    pauseAccumMs:
+      'race_pause_accum_ms' in data ? Number(data.race_pause_accum_ms ?? 0) : 0,
+  };
   const mapped = mapDbEvent(data as DbEvent);
 
   useEventsStore.setState((state) => ({
@@ -890,35 +935,40 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
                 ? (data.live_station_progress as HyroxEvent['liveStationProgress'])
                 : e.liveStationProgress,
             segments: mapped.courseLayoutSynced ? mapped.segments : e.segments,
-            heats: mapped.courseLayoutSynced ? mapped.heats : e.heats,
+            heats: mapped.courseLayoutSynced
+              ? mergeHeats(mapped.heats, e.heats)
+              : mergeHeats(mapped.heats, e.heats) ?? e.heats,
             courseLayoutSynced: mapped.courseLayoutSynced || e.courseLayoutSynced,
           }
         : e,
     ),
   }));
 
-  const refreshed = useEventsStore.getState().events.find((e) => e.id === localEventId);
-  if (
-    !mapped.courseLayoutSynced &&
-    (!refreshed?.segments?.length || stationSegmentOptions(refreshed.segments).length === 0)
-  ) {
-    const isCreator = refreshed?.organizerId === useAuthStore.getState().user?.id;
-    if (isCreator) {
-      useEventsStore.getState().resetSegmentsToHyrox(localEventId);
+  if (fullSync) {
+    const refreshed = useEventsStore.getState().events.find((e) => e.id === localEventId);
+    if (
+      !mapped.courseLayoutSynced &&
+      (!refreshed?.segments?.length || stationSegmentOptions(refreshed.segments).length === 0)
+    ) {
+      const isCreator = refreshed?.organizerId === useAuthStore.getState().user?.id;
+      if (isCreator) {
+        useEventsStore.getState().resetSegmentsToHyrox(localEventId);
+      }
     }
+
+    const bundle = await loadBundleFromDbEvents([data as DbEvent]);
+    const athleteState = useAthletesStore.getState();
+    const freshEvent = useEventsStore.getState().events.find((e) => e.id === localEventId) ?? event;
+    const { athletes, pairs } = applyMergedParticipants(
+      athleteState.athletes,
+      athleteState.pairs,
+      bundle.athletes,
+      bundle.pairs,
+      [freshEvent],
+    );
+    useAthletesStore.setState({ athletes, pairs });
   }
 
-  const bundle = await loadBundleFromDbEvents([data as DbEvent]);
-  const athleteState = useAthletesStore.getState();
-  const freshEvent = useEventsStore.getState().events.find((e) => e.id === localEventId) ?? event;
-  const { athletes, pairs } = applyMergedParticipants(
-    athleteState.athletes,
-    athleteState.pairs,
-    bundle.athletes,
-    bundle.pairs,
-    [freshEvent],
-  );
-  useAthletesStore.setState({ athletes, pairs });
   await fetchAndApplyLiveRuns(localEventId);
 
   const afterAthletes = useAthletesStore.getState();
@@ -945,12 +995,22 @@ export async function syncJudgeEventLive(localEventId: string): Promise<void> {
   useEventStaffStore
     .getState()
     .setJudgeStationForEvent(localEventId, row?.station_order ?? null);
+  if (event.supabaseId) {
+    useEventStaffStore
+      .getState()
+      .setJudgeStationForEvent(event.supabaseId, row?.station_order ?? null);
+  }
 }
 
 export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSyncResult> {
   try {
-    const { events: dbEvents, athletes: dbAthletes, pairs: dbPairs } =
-      await pullJudgeAssignedData(userId);
+    const {
+      events: dbEvents,
+      athletes: dbAthletes,
+      pairs: dbPairs,
+      assignedLocalIds,
+      assignedDbIds,
+    } = await pullJudgeAssignedData(userId);
 
     const remoteIds = new Set(dbEvents.map((e) => e.id));
     const eventState = useEventsStore.getState();
@@ -968,15 +1028,24 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
       if (mergedLocalIds.has(e.id)) return false;
       if (e.supabaseId && mergedSupabaseIds.has(e.supabaseId)) return false;
       if (remoteIds.has(e.id)) return false;
-      return true;
+      // Mantém só eventos ainda designados ao juiz
+      return (
+        assignedLocalIds.includes(e.id) ||
+        (!!e.supabaseId && assignedDbIds.includes(e.supabaseId))
+      );
     });
 
     useEventsStore.setState({
       events: dedupeEvents([...merged, ...kept]),
     });
-    if (mergedLocalIds.size > 0) {
-      useEventStaffStore.getState().setAssignedEventIds([...mergedLocalIds]);
-    }
+
+    const assignedIds = [
+      ...assignedLocalIds,
+      ...merged.map((e) => e.id),
+      ...assignedDbIds,
+      ...assignedDbIds.map((id) => localIdFromDb('evt', id)),
+    ];
+    useEventStaffStore.getState().setAssignedEventIds([...new Set(assignedIds)]);
 
     const athleteState = useAthletesStore.getState();
     const { athletes, pairs } = applyMergedParticipants(
@@ -991,7 +1060,10 @@ export async function pullAndMergeJudgeEvents(userId: string): Promise<JudgeSync
 
     for (const event of merged) {
       if (!event.segments?.length || stationSegmentOptions(event.segments).length === 0) {
-        useEventsStore.getState().resetSegmentsToHyrox(event.id);
+        const isCreator = event.organizerId === useAuthStore.getState().user?.id;
+        if (isCreator) {
+          useEventsStore.getState().resetSegmentsToHyrox(event.id);
+        }
       }
     }
 

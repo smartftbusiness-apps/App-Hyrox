@@ -104,6 +104,27 @@ export function isParticipantRaceStarted(
   return heats.some((heat) => !!heat.startedAt);
 }
 
+/**
+ * Start real do atleta: racingStartedAt → bateria dele → nunca o relógio antigo do evento.
+ * (Usar raceClock.startedAt de uma bateria anterior fazia o tempo “já estar rodando”.)
+ */
+export function resolveAthleteRaceStartedAt(
+  participant: TimingParticipant,
+  participants: TimingParticipant[],
+  heats: EventHeat[],
+): string | undefined {
+  if (participant.racingStartedAt) return participant.racingStartedAt;
+  const assignedHeats = heats.filter((heat) =>
+    assignedParticipantsForHeat(participants, heat).some(
+      (p) => participantKey(p) === participantKey(participant),
+    ),
+  );
+  for (const heat of assignedHeats) {
+    if (heat.startedAt) return heat.startedAt;
+  }
+  return undefined;
+}
+
 /** Reescreve participantKeys das baterias com os ids locais (por bib). */
 export function remapHeatRostersToLocalParticipants(
   heats: EventHeat[],

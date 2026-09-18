@@ -14,7 +14,12 @@ import { HyroxTheme } from '@/constants/Theme';
 
 import { APP_ROLE_LABELS } from '@/src/domain/appRole';
 
-import { pullAndMergeAthleteEvents, pullAndMergeFromSupabase, pullAndMergeJudgeEvents } from '@/src/api/syncService';
+import { isJudgeAssignedToEvent } from '@/src/utils/judgeAssignment';
+import {
+  pullAndMergeAthleteEvents,
+  pullAndMergeFromSupabase,
+  pullAndMergeJudgeEvents,
+} from '@/src/api/syncService';
 
 import { isSupabaseConfigured } from '@/src/lib/supabase';
 
@@ -96,6 +101,7 @@ export default function EventsScreen() {
   const isAthlete = useIsAthleteMode();
 
   const assignedEventIds = useEventStaffStore((s) => s.assignedEventIds);
+  const judgeStations = useEventStaffStore((s) => s.judgeStationByEvent);
 
   const appRole = useAccessModeStore((s) => s.appRole);
 
@@ -121,13 +127,15 @@ export default function EventsScreen() {
 
   const displayedEvents = useMemo(() => {
     if (isJudge) {
-      return events.filter((e) => assignedEventIds.includes(e.id));
+      return events.filter((e) =>
+        isJudgeAssignedToEvent(e, assignedEventIds, judgeStations),
+      );
     }
     if (isAthlete) {
       return events.filter((e) => participatingEventIds.has(e.id));
     }
     return events;
-  }, [events, isJudge, isAthlete, assignedEventIds, participatingEventIds]);
+  }, [events, isJudge, isAthlete, assignedEventIds, judgeStations, participatingEventIds]);
 
   const activeEvents = useMemo(
     () =>
