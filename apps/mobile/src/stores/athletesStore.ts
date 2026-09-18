@@ -333,7 +333,13 @@ export const useAthletesStore = create<AthletesState>()(
           if (!athlete) return { ok: false, reason: 'Atleta não encontrado' };
           set((state) => ({
             athletes: state.athletes.map((a) =>
-              a.id === participantId && a.eventId === eventId ? { ...a, status } : a,
+              a.id === participantId && a.eventId === eventId
+                ? {
+                    ...a,
+                    status,
+                    racingStartedAt: status === 'racing' ? a.racingStartedAt : null,
+                  }
+                : a,
             ),
           }));
           syncEvent(eventId);
@@ -344,10 +350,22 @@ export const useAthletesStore = create<AthletesState>()(
         if (!pair) return { ok: false, reason: 'Dupla não encontrada' };
         set((state) => ({
           pairs: state.pairs.map((p) =>
-            p.id === participantId && p.eventId === eventId ? { ...p, status } : p,
+            p.id === participantId && p.eventId === eventId
+              ? {
+                  ...p,
+                  status,
+                  racingStartedAt: status === 'racing' ? p.racingStartedAt : null,
+                }
+              : p,
           ),
           athletes: state.athletes.map((a) =>
-            a.pairId === participantId && a.eventId === eventId ? { ...a, status } : a,
+            a.pairId === participantId && a.eventId === eventId
+              ? {
+                  ...a,
+                  status,
+                  racingStartedAt: status === 'racing' ? a.racingStartedAt : null,
+                }
+              : a,
           ),
         }));
         syncEvent(eventId);

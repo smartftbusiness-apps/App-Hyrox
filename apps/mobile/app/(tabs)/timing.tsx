@@ -25,6 +25,7 @@ import { useOrganizerStore } from '@/src/stores/organizerStore';
 import {
   assignedParticipantsForHeat,
   buildTimingParticipants,
+  isParticipantHeatStarted,
   isParticipantRaceStarted,
   remapHeatRostersToLocalParticipants,
   resolveAthleteRaceStartedAt,
@@ -223,11 +224,20 @@ export default function TimingScreen() {
 
   useEffect(() => {
     if (!pickedEventId || !selectedEvent) return;
-    if (isJudgeView && !raceClock.startedAt) return;
     const heats = selectedEvent.heats ?? [];
     setRuns((prev) => {
       const next = { ...prev };
       let changed = false;
+
+      // Remove cronômetros fantasma: bateria do atleta ainda não começou.
+      for (const key of Object.keys(next)) {
+        const run = next[key];
+        if (run.raceComplete || run.participant.status === 'finished') continue;
+        if (isParticipantHeatStarted(run.participant, participants, heats)) continue;
+        delete next[key];
+        changed = true;
+      }
+
       const seedParticipant = (participant: TimingParticipant, startedIso: string) => {
         if (
           participant.status === 'finished' ||
@@ -236,11 +246,11 @@ export default function TimingScreen() {
         ) {
           return;
         }
+        if (!isParticipantHeatStarted(participant, participants, heats)) return;
         const key = participantKey(participant);
         if (next[key]) return;
         const startedAt = new Date(startedIso).getTime();
         if (Number.isNaN(startedAt)) return;
-        // Nunca criar cronômetro no futuro (evita tempo negativo).
         const safeStart = Math.min(startedAt, Date.now());
         next[key] = applySharedPauseToRun(
           isJudgeView
@@ -251,19 +261,22 @@ export default function TimingScreen() {
         changed = true;
       };
 
-      for (const participant of participants) {
-        // Só usa o start do próprio atleta — nunca o relógio antigo do evento.
-        const startedIso = participant.racingStartedAt;
-        if (!startedIso) continue;
-        if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
-        seedParticipant(participant, startedIso);
-      }
-
+      // Só seed a partir de baterias iniciadas (nunca só por racingStartedAt antigo).
       for (const heat of heats) {
         if (!heat.startedAt) continue;
         for (const participant of assignedParticipantsForHeat(participants, heat)) {
-          const startedIso = participant.racingStartedAt ?? heat.startedAt;
+          const startedIso = resolveAthleteRaceStartedAt(participant, participants, heats);
           if (!startedIso) continue;
+          seedParticipant(participant, startedIso);
+        }
+      }
+
+      // Sem baterias: permite start individual já marcado como racing.
+      if (heats.length === 0) {
+        for (const participant of participants) {
+          const startedIso = participant.racingStartedAt;
+          if (!startedIso) continue;
+          if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
           seedParticipant(participant, startedIso);
         }
       }
@@ -280,6 +293,24 @@ export default function TimingScreen() {
     raceClock.pausedAt,
     raceClock.pauseAccumMs,
   ]);
+
+  // Limpa status "racing" fantasma quando a bateria ainda não começou.
+  useEffect(() => {
+    if (!eventId || !selectedEvent || eventFinished || !isOrganizer) return;
+    const heats = selectedEvent.heats ?? [];
+    if (!heats.length) return;
+    for (const p of participants) {
+      if (p.status !== 'racing' && !p.racingStartedAt) continue;
+      if (isParticipantHeatStarted(p, participants, heats)) continue;
+      setParticipantStatus(eventId, p.id, p.type, 'checked_in');
+    }
+  }, [eventId, selectedEvent, participants, eventFinished, isOrganizer, setParticipantStatus]);
+
+  useEffect(() => {
+    if (activeKey && !runs[activeKey]) {
+      setActiveKey(null);
+    }
+  }, [activeKey, runs]);
 
   const judgeRosterParticipants = useMemo(() => {
     const heats = selectedEvent?.heats ?? [];
@@ -329,10 +360,18 @@ export default function TimingScreen() {
 
   const availableParticipants = useMemo(() => {
     const q = search.toLowerCase().trim();
+    const heats = selectedEvent?.heats ?? [];
     return participants.filter((p) => {
       const key = participantKey(p);
-      if (runs[key] || p.status === 'racing') return false;
+      if (runs[key]) return false;
       if (p.status === 'finished') return false;
+      // Em bateria não iniciada: aparece como disponível (não como "em prova").
+      if (
+        (p.status === 'racing' || p.racingStartedAt) &&
+        isParticipantHeatStarted(p, participants, heats)
+      ) {
+        return false;
+      }
       if (!q) return true;
       return (
         p.label.toLowerCase().includes(q) ||
@@ -340,7 +379,7 @@ export default function TimingScreen() {
         p.memberNames.some((n) => n.toLowerCase().includes(q))
       );
     });
-  }, [participants, runs, search]);
+  }, [participants, runs, search, selectedEvent?.heats]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 100);
@@ -400,6 +439,14 @@ export default function TimingScreen() {
           let changed = false;
           for (const [key, { run: cloudRun, updatedAt }] of cloudRuns) {
             if (cloudRun.participant.status === 'finished') continue;
+            const heats = liveEvent?.heats ?? selectedEvent.heats ?? [];
+            if (!isParticipantHeatStarted(cloudRun.participant, participants, heats)) {
+              if (next[key] && !next[key].raceComplete) {
+                delete next[key];
+                changed = true;
+              }
+              continue;
+            }
             const local = prev[key];
             const cloudUpdatedAt = new Date(updatedAt).getTime();
             if (
@@ -439,13 +486,15 @@ export default function TimingScreen() {
             changed = true;
           }
           for (const participant of participants) {
-            if (!liveClock.startedAt) break;
-            const clockIso = participant.racingStartedAt ?? liveClock.startedAt;
-            if (!clockIso) continue;
-            if (participant.status === 'finished' || participant.status === 'dnf' || participant.status === 'dns') {
+            const heats = liveEvent?.heats ?? selectedEvent.heats ?? [];
+            if (!isParticipantHeatStarted(participant, participants, heats)) {
+              const key = participantKey(participant);
+              if (next[key] && !next[key].raceComplete) {
+                delete next[key];
+                changed = true;
+              }
               continue;
             }
-            const heats = liveEvent?.heats ?? selectedEvent.heats ?? [];
             if (
               !isParticipantRaceStarted(
                 participant,
@@ -454,6 +503,11 @@ export default function TimingScreen() {
                 liveClock.startedAt,
               )
             ) {
+              continue;
+            }
+            const clockIso = resolveAthleteRaceStartedAt(participant, participants, heats);
+            if (!clockIso) continue;
+            if (participant.status === 'finished' || participant.status === 'dnf' || participant.status === 'dns') {
               continue;
             }
             const key = participantKey(participant);
@@ -471,8 +525,9 @@ export default function TimingScreen() {
             }
             if (next[key]) continue;
             if (participant.status !== 'racing' && !participant.racingStartedAt) continue;
+            const safeStart = Math.min(new Date(clockIso).getTime(), Date.now());
             next[key] = applySharedClockToRun(
-              createJudgeStationWatchRun(participant, new Date(clockIso).getTime()),
+              createJudgeStationWatchRun(participant, safeStart),
               liveClock,
             );
             changed = true;
@@ -728,6 +783,14 @@ export default function TimingScreen() {
 
   async function startParticipant(participant: TimingParticipant, raceStartedAt?: number) {
     if (!eventId || !isOrganizer) return;
+    const heats = selectedEvent?.heats ?? [];
+    if (!isParticipantHeatStarted(participant, participants, heats)) {
+      Alert.alert(
+        'Bateria não iniciada',
+        'Use “Iniciar bateria” nesta bateria — o cronômetro não parte sozinho antes disso.',
+      );
+      return;
+    }
     const key = participantKey(participant);
     if (runs[key]) {
       setActiveKey(key);
@@ -801,6 +864,7 @@ export default function TimingScreen() {
       useEventsStore.getState().events.find((e) => e.id === eventId) ?? selectedEvent;
     const heat = (freshEvent.heats ?? []).find((h) => h.id === heatId);
     if (!heat) return;
+    const wasStarted = !!heat.startedAt;
     const mark = markHeatStarted(eventId, heatId);
     if (!mark.ok) {
       Alert.alert('Bateria', mark.reason);
@@ -823,11 +887,14 @@ export default function TimingScreen() {
     const otherActive = Object.values(runs).some(
       (run) => !run.raceComplete && !batchKeys.has(participantKey(run.participant)),
     );
-    const isRestart = !!heat.startedAt;
-    if (!selectedEvent.raceStartedAt || !otherActive) {
+    const isRestart = wasStarted;
+    // Sempre zera o relógio ao iniciar/reiniciar se não há outra bateria ativa.
+    if (!otherActive) {
       await persistRaceClock(startRaceClock(startedAt));
     } else if (isRestart && isSharedRacePaused(raceClock)) {
       await persistRaceClock(resumeRaceClock(raceClock, startedAt));
+    } else if (!selectedEvent.raceStartedAt) {
+      await persistRaceClock(startRaceClock(startedAt));
     }
     clearParticipantStationMarks(eventId, [...batchKeys]);
     for (const key of batchKeys) {
@@ -919,9 +986,17 @@ export default function TimingScreen() {
 
   function openParticipantTimer(participant: TimingParticipant) {
     const key = participantKey(participant);
+    const heats = selectedEvent?.heats ?? [];
     if (isJudgeView) {
       ensureJudgeRun(participant);
       if (!wide) requestAnimationFrame(() => scrollToTimerPanel());
+      return;
+    }
+    if (!isParticipantHeatStarted(participant, participants, heats)) {
+      Alert.alert(
+        'Bateria não iniciada',
+        'Inicie a bateria deste atleta antes de abrir o cronômetro.',
+      );
       return;
     }
     if (runs[key]) {
@@ -1635,7 +1710,7 @@ export default function TimingScreen() {
                               {p.label}
                             </Text>
                             <Text style={styles.participantMeta} numberOfLines={1}>
-                              {p.status === 'racing' || runs[key]
+                              {heat.startedAt && (p.status === 'racing' || runs[key])
                                 ? 'Em prova — toque para ver o cronômetro'
                                 : heat.startedAt
                                   ? 'Bateria iniciada — toque para abrir'
