@@ -359,7 +359,12 @@ export async function fetchLiveTimingSnapshots(
       bib: mapped.bib ?? prev?.bib ?? null,
     });
   }
-  return Array.from(merged.values());
+  return Array.from(merged.values()).filter((snapshot) => {
+    const startedMs = new Date(snapshot.startedAt).getTime();
+    if (!Number.isFinite(startedMs)) return false;
+    // Ignora in_progress abandonado (ex.: 97h) — senão o cronômetro abre sozinho.
+    return Date.now() - startedMs < 12 * 60 * 60 * 1000;
+  });
 
 }
 

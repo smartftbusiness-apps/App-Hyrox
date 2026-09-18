@@ -79,18 +79,36 @@ export function assignedParticipantsForHeat(
 }
 
 /**
+ * Com baterias: só liberado se a bateria do atleta já iniciou.
+ * Sem bateria (ou fora de qualquer bateria): liberado para start individual.
+ */
+export function isParticipantHeatStarted(
+  participant: TimingParticipant,
+  participants: TimingParticipant[],
+  heats: EventHeat[],
+): boolean {
+  if (!heats.length) return true;
+  const assignedHeats = heats.filter((heat) =>
+    assignedParticipantsForHeat(participants, heat).some(
+      (p) => participantKey(p) === participantKey(participant),
+    ),
+  );
+  if (assignedHeats.length === 0) return true;
+  return assignedHeats.some((heat) => !!heat.startedAt);
+}
+
+/**
  * Atleta pode ser apontado pelo juiz quando a prova já está em andamento.
- * Relógio global ou atleta em racing liberam sempre.
- * Sem relógio global, exige bateria iniciada (match por bib quando as keys locais falham).
+ * Exige bateria iniciada (quando houver); não libera só por relógio global antigo.
  */
 export function isParticipantRaceStarted(
   participant: TimingParticipant,
   participants: TimingParticipant[],
   heats: EventHeat[],
-  raceStartedAt: string | null | undefined,
+  _raceStartedAt?: string | null,
 ): boolean {
+  if (!isParticipantHeatStarted(participant, participants, heats)) return false;
   if (participant.status === 'racing' || !!participant.racingStartedAt) return true;
-  if (raceStartedAt) return true;
   if (!heats.length) return false;
 
   const assignedHeats = heats.filter((heat) =>
@@ -106,23 +124,34 @@ export function isParticipantRaceStarted(
 
 /**
  * Start real do atleta: racingStartedAt → bateria dele → nunca o relógio antigo do evento.
- * (Usar raceClock.startedAt de uma bateria anterior fazia o tempo “já estar rodando”.)
+ * Ignora racingStartedAt fantasma se a bateria ainda não começou.
  */
 export function resolveAthleteRaceStartedAt(
   participant: TimingParticipant,
   participants: TimingParticipant[],
   heats: EventHeat[],
 ): string | undefined {
-  if (participant.racingStartedAt) return participant.racingStartedAt;
+  if (!isParticipantHeatStarted(participant, participants, heats)) return undefined;
+
   const assignedHeats = heats.filter((heat) =>
     assignedParticipantsForHeat(participants, heat).some(
       (p) => participantKey(p) === participantKey(participant),
     ),
   );
-  for (const heat of assignedHeats) {
-    if (heat.startedAt) return heat.startedAt;
+  const heatStartedAt = assignedHeats.find((h) => h.startedAt)?.startedAt;
+
+  if (participant.racingStartedAt) {
+    if (heatStartedAt) {
+      const raceMs = new Date(participant.racingStartedAt).getTime();
+      const heatMs = new Date(heatStartedAt).getTime();
+      // Start antigo de outra sessão: usa o start da bateria atual.
+      if (Number.isFinite(raceMs) && Number.isFinite(heatMs) && raceMs < heatMs - 5000) {
+        return heatStartedAt;
+      }
+    }
+    return participant.racingStartedAt;
   }
-  return undefined;
+  return heatStartedAt ?? undefined;
 }
 
 /** Reescreve participantKeys das baterias com os ids locais (por bib). */

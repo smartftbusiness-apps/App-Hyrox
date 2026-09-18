@@ -293,7 +293,10 @@ function mergeAthletesAfterPull(
         status: (existing.status === 'finished' || remote.status === 'finished'
           ? 'finished'
           : remote.status) as AthleteStatus,
-        racingStartedAt: remote.racingStartedAt ?? existing.racingStartedAt,
+        racingStartedAt:
+          remote.status === 'racing'
+            ? (remote.racingStartedAt ?? existing.racingStartedAt ?? null)
+            : null,
       } satisfies Athlete;
     }
     return remote;
@@ -371,7 +374,10 @@ function mergePairsAfterPull(
         status: (existing.status === 'finished' || remote.status === 'finished'
           ? 'finished'
           : remote.status) as AthleteStatus,
-        racingStartedAt: remote.racingStartedAt ?? existing.racingStartedAt,
+        racingStartedAt:
+          remote.status === 'racing'
+            ? (remote.racingStartedAt ?? existing.racingStartedAt ?? null)
+            : null,
       } satisfies DoublesPair;
     }
     return remote;
@@ -615,9 +621,15 @@ async function loadBundleFromDbEvents(
       const pairLocalId = row.pair_id ? localIdFromDb('pair', row.pair_id) : null;
       if (row.pair_id) pairLocalByDb.set(row.pair_id, pairLocalId!);
 
-      const run = athleteRuns.find((r) => r.athlete_id === row.id);
-      const isLiveRun = run?.status === 'in_progress';
-      const status = isLiveRun || row.status === 'racing' ? 'racing' : row.status;
+      const run = athleteRuns.find((r) => r.athlete_id === row.id && r.status === 'in_progress')
+        ?? athleteRuns.find((r) => r.athlete_id === row.id);
+      const startedMs = run?.started_at ? new Date(run.started_at).getTime() : NaN;
+      // Run "in_progress" de dias atrás não é prova ao vivo (gera 97h no cronômetro).
+      const isFreshLive =
+        run?.status === 'in_progress' &&
+        Number.isFinite(startedMs) &&
+        Date.now() - startedMs < 12 * 60 * 60 * 1000;
+      const status = isFreshLive ? 'racing' : row.status === 'racing' ? 'checked_in' : row.status;
       const eventSegments = events.find((e) => e.id === localEventId)?.segments ?? [];
       return {
         id: localAthleteId,
@@ -628,7 +640,7 @@ async function loadBundleFromDbEvents(
         categoryId: row.category_id ? catLocalByDb.get(row.category_id) ?? '' : '',
         pairId: pairLocalId,
         status,
-        racingStartedAt: isLiveRun ? run?.started_at ?? null : null,
+        racingStartedAt: isFreshLive ? run?.started_at ?? null : null,
         totalMs: run?.status === 'finished' ? run?.total_ms ?? null : null,
         segmentTimes:
           run?.status === 'finished'
@@ -650,9 +662,14 @@ async function loadBundleFromDbEvents(
       const localEventId = eventIdByDb.get(row.event_id)!;
       const localPairId = localIdFromDb('pair', row.id);
       pairLocalByDb.set(row.id, localPairId);
-      const run = pairRuns.find((r) => r.pair_id === row.id);
-      const isLiveRun = run?.status === 'in_progress';
-      const status = isLiveRun || row.status === 'racing' ? 'racing' : row.status;
+      const run = pairRuns.find((r) => r.pair_id === row.id && r.status === 'in_progress')
+        ?? pairRuns.find((r) => r.pair_id === row.id);
+      const startedMs = run?.started_at ? new Date(run.started_at).getTime() : NaN;
+      const isFreshLive =
+        run?.status === 'in_progress' &&
+        Number.isFinite(startedMs) &&
+        Date.now() - startedMs < 12 * 60 * 60 * 1000;
+      const status = isFreshLive ? 'racing' : row.status === 'racing' ? 'checked_in' : row.status;
       const eventSegments = events.find((e) => e.id === localEventId)?.segments ?? [];
       return {
         id: localPairId,
@@ -664,7 +681,7 @@ async function loadBundleFromDbEvents(
         athlete2Id: localIdFromDb('ath', row.athlete2_id),
         teamName: row.team_name ?? undefined,
         status,
-        racingStartedAt: isLiveRun ? run?.started_at ?? null : null,
+        racingStartedAt: isFreshLive ? run?.started_at ?? null : null,
         totalMs: run?.status === 'finished' ? run?.total_ms ?? null : null,
         segmentTimes:
           run?.status === 'finished'
